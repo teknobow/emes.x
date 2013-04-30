@@ -1,7 +1,7 @@
 #
 # MSX Emulator for X680x0 - emes.x
 #
-#    Copyright 1997-1998 nir
+#    Copyright 1997-1998 teknobow
 #
 
 

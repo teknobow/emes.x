@@ -1,7 +1,7 @@
 ;----------------------------------------------------------------------------------------------
 ; MSX Emulator for X680x0 - emes.x
 ;
-;    Copyright 1997-1998 nir
+;    Copyright 1997-1998 teknobow
 ;
 ;
 ; Startup Routine
@@ -255,7 +255,7 @@ str_title:
 	dc.b	'MSX Emulator for X680x0 version '
 	VERSION_STRING
 	.dc.b	CR,LF
-	dc.b	'Copyright 1997-1998 nir',CR,LF,CR,LF,0
+	dc.b	'Copyright 1997-1998 teknobow',CR,LF,CR,LF,0
 
 	.even
 

@@ -1,7 +1,7 @@
 ------------------------------------
   MSX Emulator for X680x0 - emes.x
 
-      Copyright 1997-1998 nir
+      Copyright 1997-1998 teknobow
 ------------------------------------
 
 
@@ -190,7 +190,5 @@ X68000シリーズで動作するMSXエミュレータです。
 
 ○連絡先
 
-  ホームページ   http://w3.to/nir/
-  E-mail         nir@messages.to
-  Niftyserve     PEG02605
+  E-mail         teknobow@gmail.com
 

@@ -1,7 +1,7 @@
 ------------------------------------
   MSX Emulator for X680x0 - emes.x
 
-      Copyright 1997-1998 nir
+      Copyright 1997-1998 teknobow
 ------------------------------------
 
 
@@ -37,7 +37,5 @@ bin/000/ に実行ファイルが作成されます。
 
 ○連絡先
 
-  ホームページ   http://w3.to/nir/
-  E-mail         nir@messages.to
-  Niftyserve     PEG02605
+  E-mail         teknobow@gmail.com
 
