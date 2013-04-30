@@ -1,0 +1,2189 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+;
+; Slot Management Driver
+;
+
+
+
+	.include doscall.mac
+	.include ../startup/version.equ
+	.include ../Z80/z80emu.equ
+	.if MPU.eq.68000
+		.include ../work/000/flagtbl.equ
+	.else
+		.fail
+	.endif
+	.include ../IO/slot.equ
+
+
+CR	.equ	$0d
+LF	.equ	$0a
+TAB	.equ	$09
+EOF	.equ	$1a
+
+SPEEDUP_SCC	.equ	1
+
+trap_start				.equ	0
+trap_initSlot				.equ	0
+trap_changeSlot				.equ	0
+trap_changeExtSlot			.equ	0
+trap_changeMemMap_page0			.equ	0
+trap_changeMemMap_page1			.equ	0
+trap_changeMemMap_page2			.equ	0
+trap_changeMemMap_page3			.equ	0
+trap_changeMegaROM_Page1Low		.equ	0
+trap_changeMegaROM_Page1High		.equ	0
+trap_changeMegaROM_Page2Low_wP1		.equ	0
+trap_changeMegaROM_Page2Low_wP2		.equ	0
+trap_changeMegaROM_Page2High_wP1	.equ	0
+trap_changeMegaROM_Page2High_wP2	.equ	0
+trap_changeMegaROM_Page1		.equ	0
+trap_changeMegaROM_Page2		.equ	0
+
+
+
+
+	.text
+
+
+;----------------------------------------------------------------------------------------------
+entrance:
+	;-- ファイルの先頭は bra で読み込み領域の最後に分岐
+	bra.w	dummyEntrance
+	
+	;---
+	; 識別文字列
+	.dc.b	'emes'
+	VERSION_CODE
+	
+	
+;-- 起動時
+	.dc.w	start-top			; [00]
+
+;-- 初期化
+	.dc.w	initSlot-top			; [01]
+
+;-- 基本スロット切り替え
+	.dc.w	changeSlot-top			; [02]
+
+;-- 拡張スロット切り替え
+	.dc.w	changeExtSlot-top		; [03]
+
+;-- メモリマッパセグメント選択
+	.dc.w	changeMemMap_page0-top		; [04]
+	.dc.w	changeMemMap_page1-top		; [05]
+	.dc.w	changeMemMap_page2-top		; [06]
+	.dc.w	changeMemMap_page3-top		; [07]
+
+;-- 
+	.dc.w	changeMegaROM_Page1Low-top	; [08]
+	.dc.w	changeMegaROM_Page1High-top	; [09]
+	.dc.w	changeMegaROM_Page2Low_wP1-top	; [0a]
+	.dc.w	changeMegaROM_Page2Low_wP2-top	; [0b]
+	.dc.w	changeMegaROM_Page2High_wP1-top	; [0c]
+	.dc.w	changeMegaROM_Page2High_wP2-top	; [0d]
+	.dc.w	changeMegaROM_Page1-top		; [0e]
+	.dc.w	changeMegaROM_Page2-top		; [0f]
+
+;--
+	.dc.w	0				; [10]
+	.dc.w	0				; [11]
+	.dc.w	0				; [12]
+	.dc.w	0				; [13]
+	.dc.w	0				; [14]
+	.dc.w	0				; [15]
+	.dc.w	0				; [16]
+	.dc.w	0				; [17]
+	.dc.w	0				; [18]
+	.dc.w	0				; [19]
+	.dc.w	0				; [1a]
+	.dc.w	0				; [1b]
+	.dc.w	0				; [1c]
+	.dc.w	0				; [1d]
+	.dc.w	0				; [1e]
+	.dc.w	0				; [1f]
+
+	.dcb.w	32,0
+
+top:
+	nop
+
+;----------------------------------------------------------------------------------------------
+; 組み込み時に呼ばれる
+start:
+
+.if trap_start
+	trap	#9
+.endif
+	
+	;-- タイトル表示
+	bsr	title
+	
+	rts
+
+
+
+;----------------------------------------------------------------------------------------------
+;   regFtbl ... inIO
+
+initSlot:
+
+.if trap_initSlot
+	trap	#9
+.endif
+
+	;------------------------------
+	; ROM 書き込みルーチンの登録
+	lea	normROM(pc),a0
+	suba.l	regFtbl,a0
+	suba.l	#4,a0
+	
+	move.w	a0,ROMTYPE_NORM(regZjmp)
+	move.w	a0,MEMTYPE_VOID(regZjmp)
+	
+	
+	;------------------------------
+	; メモリマッパの初期化
+	
+	;-- メモリマッパがない場合は終了
+	tst.w	SegmentsMemMap(regFtbl)
+	beq	@f
+	
+	;-- メモリマッパー管理テーブル
+	lea	MemoryMapperTbl(regFtbl),a0
+	
+	;-- スロット管理テーブル
+	lea	SlotTable(regFtbl),a1
+	
+	
+	;---------------------------------
+	;-- Page 0 : セグメント０をマップ
+	
+	; スロット管理テーブルへのオフセット設定
+	move.w	#SLOTINFO_PAGE0,d0
+	move.b	IndexMemoryMapper+1(regFtbl),d0
+	move.w	d0,IdxMemMapPage0(regZjmp)		* offset
+	
+	; スロット管理テーブル
+	lea	(regFtbl,d0.w),a1
+	
+	; 選択セグメント番号設定
+	move.b	#0,MapMemoryPage0+1(regZjmp)
+	
+	; メモリアドレス設定
+	move.l	(a0)+,d0
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.w	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	; メモリタイプ設定
+	clr.b	SLOTINFO_MEMTYPE+0(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+1(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+2(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+3(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+4(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+5(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+6(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+7(a1)			* RAM
+	
+	
+	;---------------------------------
+	;-- Page 1 : セグメント１をマップ
+	
+	; スロット管理テーブルへのオフセット設定
+	move.w	#SLOTINFO_PAGE1,d0
+	move.b	IndexMemoryMapper+1(regFtbl),d0
+	move.w	d0,IdxMemMapPage1(regZjmp)		* offset
+	
+	; スロット管理テーブル
+	lea	(regFtbl,d0.w),a1
+	
+	; 選択セグメント番号設定
+	move.b	#0,MapMemoryPage1+1(regZjmp)
+	
+	; メモリアドレス設定
+	move.l	(a0)+,d0
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.w	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	; メモリタイプ設定
+	clr.b	SLOTINFO_MEMTYPE+0(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+1(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+2(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+3(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+4(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+5(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+6(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+7(a1)			* RAM
+	
+	
+	;---------------------------------
+	;-- Page 2 : セグメント２をマップ
+	
+	; スロット管理テーブルへのオフセット設定
+	move.w	#SLOTINFO_PAGE2,d0
+	move.b	IndexMemoryMapper+1(regFtbl),d0
+	move.w	d0,IdxMemMapPage2(regZjmp)		* offset
+	
+	; スロット管理テーブル
+	lea	(regFtbl,d0.w),a1
+	
+	; 選択セグメント番号設定
+	move.b	#0,MapMemoryPage2+1(regZjmp)
+	
+	; メモリアドレス設定
+	move.l	(a0)+,d0
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.w	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	; メモリタイプ設定
+	clr.b	SLOTINFO_MEMTYPE+0(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+1(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+2(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+3(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+4(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+5(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+6(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+7(a1)			* RAM
+	
+	
+	;-- Page 3 : セグメント３をマップ
+	
+	; スロット管理テーブルへのオフセット設定
+	move.w	#SLOTINFO_PAGE3,d0
+	move.b	IndexMemoryMapper+1(regFtbl),d0
+	move.w	d0,IdxMemMapPage3(regZjmp)		* offset
+	
+	; スロット管理テーブル
+	lea	(regFtbl,d0.w),a1
+	
+	; 選択セグメント番号設定
+	move.b	#0,MapMemoryPage3+1(regZjmp)
+	
+	; メモリアドレス設定
+	move.l	(a0)+,d0
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.w	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	; メモリタイプ設定
+	clr.b	SLOTINFO_MEMTYPE+0(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+1(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+2(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+3(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+4(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+5(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+6(a1)			* RAM
+	clr.b	SLOTINFO_MEMTYPE+7(a1)			* RAM
+	
+@@:
+	
+	
+	
+	;------------------------------------------------
+	; Z80メモリ空間の初期化
+	;  Page 0 : Slot 0-0
+	;  Page 1 : Slot 0-0
+	;  Page 2 : Slot 0-0
+	;  Page 3 : Slot 0-0
+	
+	;-- 拡張スロット選択レジスタ保存領域初期化
+	moveq.l	#-1,d0					*  4
+	move.b	d0,SlotTablePage0+SLOTINFO_EXTSLOTREG(regFtbl)
+	move.b	d0,SlotTablePage1+SLOTINFO_EXTSLOTREG(regFtbl)
+	move.b	d0,SlotTablePage2+SLOTINFO_EXTSLOTREG(regFtbl)
+	move.b	d0,SlotTablePage3+SLOTINFO_EXTSLOTREG(regFtbl)
+	
+	*----------
+	* Page 0 : Slot 0-0
+	
+	;-- スロット管理テーブル
+	lea	SlotTablePage0(regFtbl),a0
+	
+	*-- destination
+	clr.w	regAdr					*  4
+	movea.l	regAdr,a1				*  4
+	
+	*-- ページコピー
+	jsr	__pageCopy(pc)				* 18
+	
+	*-- スロット切り替え用ワーク初期化
+	move.w	#SLOTINFO_PAGE0,SlotPage0(regZjmp)	* 16
+	
+	
+	*----------
+	* Page 1 : Slot 0-0
+	
+	;-- スロット管理テーブル
+	lea	SlotTablePage1(regFtbl),a0
+	
+	*-- destination
+	move.w	#$4000,regAdr				*  8
+	movea.l	regAdr,a1				*  4
+	
+	*-- ページコピー
+	jsr	__pageCopy(pc)				* 18
+	
+	*-- スロット切り替え用ワーク初期化
+	move.w	#SLOTINFO_PAGE1,SlotPage1(regZjmp)	* 16
+	
+	
+	*----------
+	* Page 2 : Slot 0-0
+	
+	;-- スロット管理テーブル
+	lea	SlotTablePage2(regFtbl),a0
+	
+	*-- destination
+	move.w	#$8000,regAdr				*  8
+	movea.l	regAdr,a1				*  4
+	
+	*-- ページコピー
+	jsr	__pageCopy(pc)				* 18
+	
+	*-- スロット切り替え用ワーク初期化
+	move.w	#SLOTINFO_PAGE2,SlotPage2(regZjmp)	* 16
+	
+	
+	*----------
+	* Page 3 : Slot 0-0
+	
+	;-- スロット管理テーブル
+	lea	SlotTablePage3(regFtbl),a0
+	
+	*-- destination
+	move.w	#$c000,regAdr				*  8
+	movea.l	regAdr,a1				*  4
+	
+	*-- ページコピー
+	jsr	__pageCopy(pc)				* 18
+	
+	*-- スロット切り替え用ワーク初期化
+	move.w	#SLOTINFO_PAGE3,SlotPage3(regZjmp)	* 16
+	
+	
+	;-----------
+	
+	*-- 基本スロット切り替え用ワーク初期化
+	clr.b	IOdata_A8(regZjmp)			* 16
+	
+	*-- 拡張スロット切り替え用ワーク初期化
+	move.w	#-1,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	move.b	#-1,(a0)				* 16
+	
+	;-- 拡張スロット
+	clr.w	SlotTablePage0(regFtbl)			* 
+	clr.w	SlotTablePage1(regFtbl)			* 
+	clr.w	SlotTablePage2(regFtbl)			* 
+	clr.w	SlotTablePage3(regFtbl)			* 
+	
+	
+	rts
+
+
+
+;----------------------------------------------------------------------------------------------
+; 基本スロット切り替え
+;   d1.b ... 設定値
+
+changeSlot:
+
+.if trap_changeSlot
+	trap	#9
+.endif
+
+	; スロット選択レジスタ保存用
+	move.w	d7,SAVE_D7(regZjmp)			* 12
+	
+	;---------------------------------------------------
+	*-- page 3
+	
+	; スロット管理テーブルへのオフセット
+	move.w	SlotPage3(regZjmp),d2			* 12
+	
+	; 同一基本スロットならなにもしない
+	move.w	#SLOTINFO_PAGE3+%1100_0000,d0		*  8
+	and.b	d1,d0					*  4	[33221100]
+	cmp.b	d2,d0					*  4
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロット選択レジスタ設定値保存
+	move.w	d1,d7					*  4
+	
+	*-- 現在現れているページの管理テーブル
+	lea	(regFtbl,d2.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* ROM ならば保存は行わない
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	* source
+	move.w	#$c000,d2				*  8	regAdr
+	
+	; copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	
+@@:	*-- 切り替え
+	move.w	d0,SlotPage3(regZjmp)			* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	* destination
+	move.w	#$c000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	* 拡張スロット選択レジスタ
+	move.b	SLOTINFO_EXTSLOTREG(a0),d2		* 12	regAdr
+	
+	* 選択スロットの管理テーブル
+	adda.w	(a0),a0					* 12
+	
+	jsr	__page3Copy(pc)				* 18
+	
+	
+	; スロット選択レジスタ設定値復元
+	move.b	d7,d1					*  4
+	
+1:	
+	*---------------------------------------------------
+	*-- page 2
+	
+	; スロット管理テーブルへのオフセット
+	move.w	SlotPage2(regZjmp),d2			* 12
+	
+	; 同一基本スロットならなにもしない
+	rol.b	#2,d1					* 10
+	move.w	#SLOTINFO_PAGE2+%1100_0000,d0		*  8
+	and.b	d1,d0					*  4	[22110033]
+	cmp.b	d2,d0					*  4
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロット選択レジスタ設定値保存
+	move.w	d1,d7					*  4
+	
+	*-- 現在現れているページの保存
+	lea	(regFtbl,d2.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* ROM ならば保存は行わない
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	* source
+	move.w	#$8000,d2				*  8	regAdr
+	
+	; copybackRAM
+	jsr	copybackRAM(pc)				 *18
+	
+	
+@@:	*-- 切り替え
+	move.w	d0,SlotPage2(regZjmp)			* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* destination
+	move.w	#$8000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+	
+	; スロット選択レジスタ設定値復元
+	move.w	d7,d1					*  4
+	
+1:	
+	
+	
+	*---------------------------------------------------
+	*-- page 1
+	
+	; スロット管理テーブルへのオフセット
+	move.w	SlotPage1(regZjmp),d2			* 12
+	
+	; 同一基本スロットならなにもしない
+	rol.b	#2,d1					* 10
+	move.w	#SLOTINFO_PAGE1+%1100_0000,d0		*  8
+	and.b	d1,d0					*  4	[11003322]
+	cmp.b	d2,d0					*  4
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロット選択レジスタ設定値保存
+	move.w	d1,d7					*  4
+	
+	*-- 現在現れているページの保存
+	lea	(regFtbl,d2.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* ROM ならば保存は行わない
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	* source
+	move.w	#$4000,d2				*  8	regAdr
+	
+	; copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	
+@@:	*-- 切り替え
+	move.w	d0,SlotPage1(regZjmp)			* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* destination
+	move.w	#$4000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+	
+	; スロット選択レジスタ設定値復元
+	move.w	d7,d1					*  4
+	
+1:	
+	
+	*---------------------------------------------------
+	*-- page 0
+	
+	; スロット管理テーブルへのオフセット
+	move.w	SlotPage0(regZjmp),d2			* 12
+	
+	; 同一基本スロットならなにもしない
+	rol.b	#2,d1					* 10
+	move.w	#SLOTINFO_PAGE0+%1100_0000,d0		*  8
+	and.b	d1,d0					*  4	[00332211]
+	cmp.b	d2,d0					*  4
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- 現在現れているページの保存
+	lea	(regFtbl,d2.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* ROM ならば保存は行わない
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 
+	bne.s	1f					* 10/ 8 (T/F)
+	
+	* source
+	clr.w	d2					*  4	regAdr
+	
+	; copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	
+@@:	*-- 切り替え
+	move.w	d0,SlotPage0(regZjmp)			* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	* destination
+	clr.w	d2					*  4	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+	
+1:	
+	move.w	SAVE_D7(regZjmp),d7			* 12
+	
+	rts
+
+
+
+
+;----------------------------------------------------------------------------------------------
+* 拡張スロットの切り替え
+* IN:	d1.b ... $ffff (拡張スロット選択レジスタ) への設定値
+*	a0.b ... Z80emu での $ffff のアドレス
+
+changeExtSlot:
+
+.if trap_changeExtSlot
+	trap	#9
+.endif
+
+	;-- スロット選択レジスタ保存用
+	move.l	d7,-(sp)				* 12	<-- これで inIO
+	move.b	d1,d7					*  4
+	
+	*-- 拡張スロット選択レジスタ書き込み(全てのスロットは拡張スロットのため反転)
+	not.b	d1					*  4
+	move.b	d1,(a0)					*  8
+	
+	*-- 基本スロット切り替え時のための拡張スロット選択レジスタの保存
+	move.w	SlotPage3(regZjmp),d2			* 12
+	move.b	d1,SLOTINFO_EXTSLOTREG(regFtbl,d2.w)	* 14
+	
+	*-- 拡張スロットはページ３に現れているスロットに対して選択が行われる
+	
+	
+	*---------------------------------------------------
+	*-- Page 2
+	moveq.l	#%0011_0000,d0				*  4	33221100
+	and.w	d7,d0					*  4
+	
+	*-- 対象ページが表に出ているか？
+	cmp.b	SlotPage2+1(regZjmp),d2			* 12
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロットが現れていない場合 (オフセットのみ設定)
+	move.w	#SLOTINFO_PAGE2,d2			*  8
+	move.b	SlotPage3+1(regZjmp),d2			* 12
+	move.w	d0,(regFtbl,d2.w)			* 14
+	bra	2f					* 10
+	
+1:
+	*-- スロットが現れている場合 (ページコピー)
+	* スロット管理テーブル
+	move.w	SlotPage2(regZjmp),d2			* 12
+	lea	(regFtbl,d2.w),a0			* 12
+	
+	* 同一拡張スロット番号ならば何も行わない
+	cmp.w	(a0),d0					*  8
+	beq.s	2f					* 10/ 8 (T/F)
+	
+	* 切り替え前の拡張スロット番号
+	move.w	(a0),d1					*  8
+	
+	* 切り替え後の拡張スロット番号を設定
+	move.w	d0,(a0)					*  8
+	
+	* 切り替え前の拡張スロットが RAM ならば保存を行う
+	lea	(a0,d1.w),a1				* 12
+	tst.b	SLOTINFO_MEMTYPE(a1)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	*-- 保存
+	move.l	a0,d0					*  4
+	move.l	a1,a0					*  4
+	
+	* source
+	move.w	#$8000,d2				*  8	regAdr
+	
+	* copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	movea.l	d0,a0					*  4
+	
+@@:	
+	*-- 切り替え
+	adda.w	(a0),a0					*  8
+	
+	* destination
+	move.w	#$8000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+2:	
+	
+	
+	*---------------------------------------------------
+	*-- Page 1
+	move.w	SlotPage3(regZjmp),d2			* 12
+	
+	rol.b	#2,d7					* 10
+	moveq.l	#%0011_0000,d0				*  4	22110033
+	and.w	d7,d0					*  4
+	
+	*--
+	cmp.b	SlotPage1+1(regZjmp),d2			* 12
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロットが現れていない場合 (オフセットのみ設定)
+	move.w	#SLOTINFO_PAGE1,d2			*  8
+	move.b	SlotPage3+1(regZjmp),d2			* 12
+	move.w	d0,(regFtbl,d2.w)			* 14
+	bra	2f					* 10
+	
+1:	*-- スロットが現れている場合 (ページコピー)
+	* スロット管理テーブル
+	move.w	SlotPage1(regZjmp),d2			* 12
+	lea	(regFtbl,d2.w),a0			* 12
+	
+	* 同一拡張スロット番号ならば何も行わない
+	cmp.w	(a0),d0					*  8
+	beq.s	2f					* 10/ 8 (T/F)
+	
+	* 切り替え前の拡張スロット番号
+	move.w	(a0),d1					*  8
+	
+	* 切り替え後の拡張スロット番号を設定
+	move.w	d0,(a0)					*  8
+	
+	* 切り替え前の拡張スロットが RAM ならば保存を行う
+	lea	(a0,d1.w),a1				* 12
+	tst.b	SLOTINFO_MEMTYPE(a1)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	*-- 保存
+	move.l	a0,d0					*  4
+	move.l	a1,a0					*  4
+	
+	* source
+	move.w	#$4000,d2				*  8	regAdr
+	
+	* copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	movea.l	d0,a0					*  4
+	
+@@:	
+	*-- 切り替え
+	adda.w	(a0),a0					*  8
+	
+	* destination
+	move.w	#$4000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+2:	
+	
+	
+	
+	*---------------------------------------------------
+	*-- Page 0
+	move.w	SlotPage3(regZjmp),d2			* 12
+	
+	rol.b	#2,d7					* 10
+	moveq.l	#%0011_0000,d0				*  4	11003322
+	and.w	d7,d0					*  4
+	
+	*--
+	cmp.b	SlotPage0+1(regZjmp),d2			* 12
+	beq.s	1f					* 10/ 8 (T/F)
+	
+	*-- スロットが現れていない場合 (オフセットのみ設定)
+	move.w	#SLOTINFO_PAGE0,d2			*  8
+	move.b	SlotPage3+1(regZjmp),d2			* 12
+	move.w	d0,(regFtbl,d2.w)			* 14
+	bra	2f					* 10
+	
+1:	*-- スロットが現れている場合 (ページコピー)
+	* スロット管理テーブル
+	move.w	SlotPage0(regZjmp),d2			* 12
+	lea	(regFtbl,d2.w),a0			* 12
+	
+	* 同一拡張スロット番号ならば何も行わない
+	cmp.w	(a0),d0					*  8
+	beq.s	2f					* 10/ 8 (T/F)
+	
+	* 切り替え前の拡張スロット番号
+	move.w	(a0),d1					*  8
+	
+	* 切り替え後の拡張スロット番号を設定
+	move.w	d0,(a0)					*  8
+	
+	* 切り替え前の拡張スロットが RAM ならば保存を行う
+	lea	(a0,d1.w),a1				* 12
+	tst.b	SLOTINFO_MEMTYPE(a1)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	*-- 保存
+	move.l	a0,d0					*  4
+	move.l	a1,a0					*  4
+	
+	* source
+	clr.w	d2					*  4	regAdr
+	
+	* copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	movea.l	d0,a0					*  4
+	
+@@:	
+	*-- 切り替え
+	adda.w	(a0),a0					*  8
+	
+	* destination
+	clr.w	d2					*  4	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	jsr	__pageCopy(pc)				* 18
+2:	
+	
+	
+	
+	*---------------------------------------------------
+	*-- Page 3
+	move.w	SlotPage3(regZjmp),d2			* 12
+	
+	rol.b	#2,d7					* 10
+	moveq.l	#%0011_0000,d0				*  4	00332211
+	and.w	d7,d0					*  4
+	
+	*-- ページコピー
+	* スロット管理テーブル
+	lea	(regFtbl,d2.w),a0			* 12
+	
+	* 同一拡張スロット番号ならば何も行わない
+	cmp.w	(a0),d0					*  8
+	beq.s	2f					* 10/ 8 (T/F)
+	
+	* 切り替え前の拡張スロット番号
+	move.w	(a0),d1					*  8
+	
+	* 切り替え後の拡張スロット番号を設定
+	move.w	d0,(a0)					*  8
+	
+	* 切り替え前の拡張スロットが RAM ならば保存を行う
+	lea	(a0,d1.w),a1				* 12
+	tst.b	SLOTINFO_MEMTYPE(a1)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	*-- 保存
+	move.l	a0,d0					*  4
+	move.l	a1,a0					*  4
+	
+	* source
+	move.w	#$c000,d2				*  8	regAdr
+	
+	* copybackRAM
+	jsr	copybackRAM(pc)				* 18
+	
+	movea.l	d0,a0					*  4
+	
+@@:	
+	*-- 切り替え
+	* destination
+	move.w	#$c000,d2				*  8	regAdr
+	movea.l	d2,a1					*  4	regAdr
+	
+	; 拡張スロット選択レジスタ
+	move.b	SLOTINFO_EXTSLOTREG(a0),d2		* 12
+	
+	; スロット管理テーブル
+	adda.w	(a0),a0					*  8
+	
+	
+	jsr	__page3Copy(pc)				* 18
+2:	
+	
+	;--
+	move.l	(sp)+,d7				* 12
+	
+	FETCH						* 
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+; メモリマッパセグメント選択
+;	d0.b ... 選択セグメント
+
+changeMemMap_page0:
+
+.if trap_changeMemMap_page0
+	trap	#9
+.endif
+	
+	;-- メモリマッパーは表に出ているか?
+	move.w	SlotPage0(regZjmp),d0			* 12
+	or.w	(regFtbl,d0.w),d0			* 14
+	cmp.w	IdxMemMapPage0(regZjmp),d0		* 12
+	bne.s	2f					* 10/ 8 (T/F)
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	;-- 出ている場合はページコピー
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	; source
+	clr.w	regAdr					*  4
+	jsr	copybackRAM(pc)				* 18
+	
+@@:	;------
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage0(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage0(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	; destination
+	clr.w	regAdr					*  4
+	movea.l	regAdr,a1				*  4
+	
+	jmp	__pageCopy(pc)				* 10
+	
+	
+2:	;-- 表に出ていない場合は、アドレスのみ設定
+	
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage0(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage0(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	rts						* 16
+
+
+;----------------------------------------------------------------------------------------------
+changeMemMap_page1:
+
+.if trap_changeMemMap_page1
+	trap	#9
+.endif
+	
+	;-- メモリマッパーは表に出ているか?
+	move.w	SlotPage1(regZjmp),d0			* 12
+	or.w	(regFtbl,d0.w),d0			* 14
+	cmp.w	IdxMemMapPage1(regZjmp),d0		* 12
+	bne.s	2f					* 10/ 8 (T/F)
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	;-- 出ている場合はページコピー
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	; source
+	clr.w	regAdr					*  4
+	jsr	copybackRAM(pc)				* 18
+	
+@@:	;------
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage1(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage1(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	; destination
+	clr.w	regAdr					*  4
+	movea.l	regAdr,a1				*  4
+	
+	jmp	__pageCopy(pc)				* 10
+	
+	
+2:	;-- 表に出ていない場合は、アドレスのみ設定
+	
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage1(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage1(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+changeMemMap_page2:
+
+.if trap_changeMemMap_page2
+	trap	#9
+.endif
+	
+	;-- メモリマッパーは表に出ているか?
+	move.w	SlotPage2(regZjmp),d0			* 12
+	or.w	(regFtbl,d0.w),d0			* 14
+	cmp.w	IdxMemMapPage2(regZjmp),d0		* 12
+	bne.s	2f					* 10/ 8 (T/F)
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	;-- 出ている場合はページコピー
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	; source
+	clr.w	regAdr					*  4
+	jsr	copybackRAM(pc)				* 18
+	
+@@:	;------
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage2(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage2(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	; destination
+	clr.w	regAdr					*  4
+	movea.l	regAdr,a1				*  4
+	
+	jmp	__pageCopy(pc)				* 10
+	
+	
+2:	;-- 表に出ていない場合は、アドレスのみ設定
+	
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage2(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage2(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+changeMemMap_page3:
+
+.if trap_changeMemMap_page3
+	trap	#9
+.endif
+
+	;-- メモリマッパーは表に出ているか?
+	move.w	SlotPage3(regZjmp),d0			* 12
+	or.w	(regFtbl,d0.w),d0			* 14
+	cmp.w	IdxMemMapPage3(regZjmp),d0		* 12
+	bne.s	2f					* 10/ 8 (T/F)
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	;-- 出ている場合はページコピー
+	tst.b	SLOTINFO_MEMTYPE(a0)			* 12
+	bne.s	@f					* 10/ 8 (T/F)
+	
+	; source
+	clr.w	regAdr					*  4
+	jsr	copybackRAM(pc)				* 18
+	
+@@:	;------
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage3(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage3(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	; destination
+	clr.w	regAdr					*  4
+	movea.l	regAdr,a1				*  4
+	
+	; 拡張スロット選択レジスタ
+	move.w	SlotPage3(regZjmp),d0			* 12
+	move.b	SLOTINFO_EXTSLOTREG(regFtbl,d0.w),regAdr	* 
+	
+	jmp	__page3Copy(pc)				* 10
+	
+	
+2:	;-- 表に出ていない場合は、アドレスのみ設定
+	
+	; 切り替え後のメモリアドレス
+	move.w	MapMemoryPage3(regZjmp),d0		* 12
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	MemoryMapperTbl(regFtbl),a0		*  8
+	movea.l	(a0,d0.w),a1				* 18
+	
+	; スロット管理テーブル
+	move.w	IdxMemMapPage3(regZjmp),d0		* 12
+	lea	(regFtbl,d0.w),a0			* 12
+	
+	; メモリアドレス(L)設定
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 18
+	
+	; メモリタイプ (0:RAM, -1:ROM)
+	seq.b	d0					*  6/ 4 (T/F)
+	move.b	d0,SLOTINFO_MEMTYPE+0(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+1(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+2(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+3(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+4(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+5(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+6(a0)		* 12
+	move.b	d0,SLOTINFO_MEMTYPE+7(a0)		* 12
+	
+	; メモリアドレス(H)設定
+	lea	$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 18
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ１上位 ($4000 - $5fff) を切り換え
+;
+;   0:KONAMI(with SCC) : $5000 - $57ff : Page 1
+;   1:ASCII(8K)        : $6000 - $67ff : Page 1
+;   2:ASCII(16K)       : ------------- : 
+;   3:Panasonic        : ------------- : 
+;   4:KONAMI           : $4000 - $5fff : Page 1
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b    ... セグメント番号番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page1Low:
+
+.if trap_changeMegaROM_Page1Low
+	trap	#9
+	move.w	#$8110,d1
+.endif
+
+	;-- スロット管理テーブル
+	move.w	SlotPage1(regZjmp),d1			* 12
+	lea	(regFtbl,d1.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_Low(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_Low(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$4000,regAdr				*  4
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ１下位 ($6000 - $7fff) を切り替え
+;
+;   0:KONAMI(with SCC) : $7000 - $77ff : Page 1
+;   1:ASCII(8K)        : $6800 - $6fff : Page 1
+;   2:ASCII(16K)       : ------------- : 
+;   3:Panasonic        : ------------- : 
+;   4:KONAMI           : $6000 - $7fff : Page 1
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page1High:
+
+.if trap_changeMegaROM_Page1High
+	trap	#9
+	move.w	#$8111,d1
+.endif
+
+	;-- スロット管理テーブル
+	move.w	SlotPage1(regZjmp),d1			* 12
+	lea	(regFtbl,d1.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_High(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_High(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$6000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ２上位 ($8000 - $9fff) を切り替え（ページ１書き込み時）
+;
+;   0:KONAMI(with SCC) : $9000 - $97ff : Page 2
+;   1:ASCII(8K)        : $7000 - $77ff : Page 1
+;   2:ASCII(16K)       : ------------- : 
+;   3:Panasonic        : ------------- : 
+;   4:KONAMI           : $8000 - $9fff : Page 2
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page2Low_wP1:
+
+.if trap_changeMegaROM_Page2Low_wP1
+	trap	#9
+	move.w	#$8120,d1
+.endif
+
+	;-- Page 1,2 が同一スロットでない時はアドレス設定のみ
+	move.w	SlotPage2(regZjmp),d1			* 12
+	cmp.b	SlotPage1+1(regZjmp),d1			* 12
+	bne.s	1f
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d1.w),a0			* 12
+	
+	;-- 拡張スロットのチェック
+	move.w	(a0),d1					*  8
+	cmp.w	-$0100(a0),d1				* 12
+	bne.s	2f
+	
+	;--
+	adda.w	d1,a0					*  8
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_Low(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_Low(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$8000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+	;-- メモリアドレス設定のみ
+1:
+	lea	(regFtbl,d1.w),a0			* 12
+	move.w	(a0),d1					*  8
+2:
+	adda.w	d1,a0					*  8
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ２上位 ($8000 - $9fff) を切り替え（ページ２書き込み時）
+;
+;   0:KONAMI(with SCC) : $9000 - $97ff : Page 2
+;   1:ASCII(8K)        : $7000 - $77ff : Page 1
+;   2:ASCII(16K)       : ------------- : 
+;   3:Panasonic        : ------------- : 
+;   4:KONAMI           : $8000 - $9fff : Page 2
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page2Low_wP2:
+
+.if trap_changeMegaROM_Page2Low_wP2
+	trap	#9
+	move.w	#$8220,d1
+.endif
+
+.if SPEEDUP_SCC
+	cmpi.b	#63,d0
+	beq.s	9f
+.endif
+
+	;-- スロット管理テーブル
+	move.w	SlotPage2(regZjmp),d1			* 12
+	lea	(regFtbl,d1.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_Low(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_Low(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$8000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ２下位 ($a000 - $bfff) を切り替え（ページ１書き込み時）
+;
+;   0:KONAMI(with SCC) : $b000 - $b7ff : Page 2
+;   1:ASCII(8K)        : $7800 - $7fff : Page 1
+;   2:ASCII(16K)       : なし          :
+;   4:KONAMI           : $a000 - $bfff : Page 2
+;   5:R-TYPE           : なし          :
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page2High_wP1:
+
+.if trap_changeMegaROM_Page2High_wP1
+	trap	#9
+	move.w	#$8121,d1
+.endif
+
+	;-- Page 1,2 が同一スロットでない時はアドレス設定のみ
+	move.w	SlotPage2(regZjmp),d1			* 12
+	cmp.b	SlotPage1+1(regZjmp),d1			* 12
+	bne.s	1f
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d1.w),a0			* 12
+	
+	;-- 拡張スロットのチェック
+	move.w	(a0),d1					*  8
+	cmp.w	-$0100(a0),d1				* 12
+	bne.s	2f
+	
+	;--
+	adda.w	d1,a0					*  8
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_High(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_High(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$a000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+	
+	;-- メモリアドレス設定のみ
+1:
+	lea	(regFtbl,d1.w),a0			* 12
+	move.w	(a0),d1					*  8
+2:
+	adda.w	d1,a0					*  8
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ２下位 ($a000 - $bfff) を切り替え（ページ２書き込み時）
+;
+;   0:KONAMI(with SCC) : $b000 - $b7ff : Page 2
+;   1:ASCII(8K)        : $7800 - $7fff : Page 1
+;   2:ASCII(16K)       : なし          :
+;   4:KONAMI           : $a000 - $bfff : Page 2
+;   5:R-TYPE           : なし          :
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page2High_wP2:
+
+.if trap_changeMegaROM_Page2High_wP2
+	trap	#9
+	move.w	#$8221,d1
+.endif
+
+	;-- スロット管理テーブル
+	move.w	SlotPage2(regZjmp),d1			* 12
+	lea	(regFtbl,d1.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_High(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_High(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	movea.l	(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$a000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_8K(pc)				* 10
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ１ ($4000 - $7fff) を切り替え
+;
+;   0:KONAMI(with SCC) : ------------- : 
+;   1:ASCII(8K)        : ------------- : 
+;   2:ASCII(16K)       : $6000 - $6fff : Page 1
+;   4:KONAMI           : ------------- : 
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page1:
+
+.if trap_changeMegaROM_Page1
+	trap	#9
+	move.w	#$0110,d1
+.endif
+
+	;-- スロット管理テーブル
+	move.w	SlotPage1(regZjmp),d1			* 12
+	lea	(regFtbl,d1.w),a0			* 12
+	adda.w	(a0),a0					* 12
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_Low(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_Low(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	lsl.w	#3,d0					* 12
+	movea.l	4(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	lea	-$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$4000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_16K(pc)				* 10
+	
+9:	;--
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; ページ２ ($8000 - $bfff) を切り替え
+;
+;   0:KONAMI(with SCC) : ------------- : 
+;   1:ASCII(8K)        : ------------- : 
+;   2:ASCII(16K)       : $7000 - $7fff : Page 1
+;   4:KONAMI           : ------------- : 
+;   5:R-TYPE           : ------------- : 
+;
+;   d0.b ... ページ番号
+;   regFtbl ... inIO
+
+changeMegaROM_Page2:
+
+.if trap_changeMegaROM_Page2
+	trap	#9
+	move.w	#$0220,d1
+.endif
+
+	;-- Page 1,2 が同一スロットでない時はアドレス設定のみ
+	move.w	SlotPage2(regZjmp),d1			* 12
+	cmp.b	SlotPage1+1(regZjmp),d1			* 12
+	bne.s	1f
+	
+	;-- スロット管理テーブル
+	lea	(regFtbl,d1.w),a0			* 12
+	
+	;-- 拡張スロットのチェック
+	move.w	(a0),d1					*  8
+	cmp.w	-$0100(a0),d1				* 12
+	bne.s	1f
+	
+	;--
+	adda.w	d1,a0					*  8
+	
+	;-- 同一セグメントなら終了
+	cmp.b	SLOTINFO_SEGMENT_Low(a0),d0		* 12
+	beq.s	9f					* 10/ 8 (T/F)
+	move.b	d0,SLOTINFO_SEGMENT_Low(a0)		* 12
+	
+	;-- メモリアドレス設定
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	lsl.w	#3,d0					* 12
+	movea.l	4(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	lea	-$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	;-- メモリ内容コピー
+	move.w	#$8000,regAdr				*  8
+	movea.l	regAdr,a0				*  4
+	
+	jmp	memcpy_16K(pc)				* 10
+	
+1:	;----------------------------------------------
+	; アドレス設定のみ
+	adda.w	d1,a0					*  8
+	movea.l	SLOTINFO_MEGAROM_TBL(a0),a1		* 
+	ext.w	d0					*  4
+	lsl.w	#3,d0					* 12
+	movea.l	4(a1,d0.w),a1				* 
+	move.l	a1,SLOTINFO_MEMADR_High(a0)		* 
+	lea	-$2000(a1),a1				*  8
+	move.l	a1,SLOTINFO_MEMADR_Low(a0)		* 
+	
+	
+9:	;--
+	rts						* 16
+
+
+
+
+;----------------------------------------------------------------------------------------------
+; Z80メモリ空間にある RAM の内容をメモリ保存する
+; RAM なので、連続した 16KB を転送
+;   a0.l ... スロット管理テーブル
+;   d2.l ... source
+;
+;   d0.w ... 要保存
+
+copybackRAM:
+	movem.l	d0/d2-d6/a2-a3,-(sp)			* 
+	
+	;-- dst
+	movea.l	SLOTINFO_MEMADR_Low(a0),a1		* 
+	
+	;-- source
+	movea.l	d2,a0					*  4
+	
+	;-- 16KB 転送
+	moveq.l	#16*1024/256-1,d1			*  4
+@@:	.rept 256/32
+	movem.l	(a0)+,d0/d2/d3/d4/d5/d6/a2/a3		* 76
+	movem.l	d0/d2/d3/d4/d5/d6/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	movem.l	(sp)+,d0/d2-d6/a2-a3			* 
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; Z80メモリ空間へスロット内容を転送（ページ０～２用）
+;   a0.l ... スロット管理テーブル
+;   a1.l ... destination
+
+__pageCopy:
+	movem.l	d2-d7/a2-a3/a5-a6,-(sp)			* 
+	
+	;-- メモリタイプ
+	lea	SLOTINFO_MEMTYPE(a0),a6			*  8
+	
+	;-- 未実装メモリならメモリタイプのみ設定
+	move.b	(a6)+,d0				*  8
+	bmi	pcp_markOnly				* 
+	
+	
+	;----------------------------------------
+	; + $0000 - $1fff (8KB)
+	
+	; ソース
+	movea.l	SLOTINFO_MEMADR_Low(a0),a5		* 
+	
+	; 8KB 転送
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	
+	;----------------------------------------
+	; + $2000 - $3fff (8KB)
+	
+	; ソース
+	movea.l	SLOTINFO_MEMADR_High(a0),a5		* 
+	
+	; 8KB 転送
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	
+	movem.l	(sp)+,d2-d7/a2-a3/a5-a6			* 
+	
+	rts						* 16
+	
+	
+	;-------------------------------------
+pcp_markOnly:
+	lea	O_CHKROM(regZjmp,a1.w),a0		* 12
+	
+	TEMP: = $0000
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	
+	
+	movem.l	(sp)+,d2-d7/a2-a3/a5-a6			* 
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+; Z80メモリ空間へスロット内容を転送（ページ３用）
+;   a0.l ... スロット管理テーブル
+;   a1.l ... destination
+;   d2.b ... 拡張スロット選択レジスタ
+
+__page3Copy:
+	movem.l	d2-d7/a2-a3/a5-a6,-(sp)			* 
+	
+	;-- メモリタイプ
+	lea	SLOTINFO_MEMTYPE(a0),a6			*  8
+	
+	;-- 未実装メモリならメモリタイプのみ設定
+	move.b	(a6)+,d0				*  8
+	bmi	p3cp_markOnly				* 
+	
+	
+	;----------------------------------------
+	; + $0000 - $1fff (8KB)
+	
+	; ソース
+	movea.l	SLOTINFO_MEMADR_Low(a0),a5		* 
+	
+	; 8KB 転送
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	
+	;----------------------------------------
+	; + $2000 - $3fff (8KB)
+	
+	; ソース
+	movea.l	SLOTINFO_MEMADR_High(a0),a5		* 
+	
+	; 8KB 転送
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	;--
+	move.b	(a6)+,d0				*  8
+	moveq.l	#2*1024/256-1,d1			*  4
+@@:	move.b	d0,O_CHKROM(regZjmp,a1.w)		* 
+	.rept 256/32
+	movem.l	(a5)+,d2/d3/d4/d5/d6/d7/a2/a3		* 76
+	movem.l	d2/d3/d4/d5/d6/d7/a2/a3,(a1)		* 72
+	lea	32(a1),a1				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	
+	movem.l	(sp)+,d2-d7/a2-a3/a5-a6			* 
+	
+	;----------------------------------------
+	; 拡張スロット選択レジスタ設定
+	move.b	d2,-(a1)				*  8
+	
+	rts						* 16
+	
+	
+	;-------------------------------------
+p3cp_markOnly:
+	; 拡張スロット選択レジスタ設定
+	move.b	d2,$3fff(a1)				* 
+	
+	lea	O_CHKROM(regZjmp,a1.w),a0		* 12
+	
+	TEMP: = $0000
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	;--
+	move.b	(a6)+,d0				*  8
+	.rept 256/4/8
+	move.b	d0,TEMP(a0)				* 12
+	TEMP: = TEMP+$100
+	.endm
+	
+	
+	movem.l	(sp)+,d2-d7/a2-a3/a5-a6			* 
+	
+	rts						* 16
+
+
+;----------------------------------------------------------------------------------------------
+; a0 ... destination
+; a1 ... source
+
+memcpy_8K:
+	movem.l	d2-d6/a2-a3,-(sp)			* 
+	
+	moveq.l	#8*1024/256-1,d1			*  4
+@@:	.rept 256/32
+	movem.l	(a1)+,d0/d2/d3/d4/d5/d6/a2/a3		* 76
+	movem.l	d0/d2/d3/d4/d5/d6/a2/a3,(a0)		* 72
+	lea	32(a0),a0				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	movem.l	(sp)+,d2-d6/a2-a3			* 
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+memcpy_16K:
+	movem.l	d2-d6/a2-a3,-(sp)			* 
+	
+	moveq.l	#16*1024/256-1,d1			*  4
+@@:	.rept 256/32
+	movem.l	(a1)+,d0/d2/d3/d4/d5/d6/a2/a3		* 76
+	movem.l	d0/d2/d3/d4/d5/d6/a2/a3,(a0)		* 72
+	lea	32(a0),a0				*  8
+	.endm
+	dbra	d1,@b					* 10/ 14 (T/F)
+	
+	movem.l	(sp)+,d2-d6/a2-a3			* 
+	
+	rts						* 16
+
+
+
+;----------------------------------------------------------------------------------------------
+normROM:
+	
+	rts						* 16
+
+
+;----------------------------------------------------------------------------------------------
+title:
+	pea.l	msg_title(pc)
+	DOS	__PRINT
+	addq.l	#4,sp
+	
+	rts
+
+msg_title:
+	.dc.b	'Slot Driver (MegaROM対応版) version '
+	VERSION_STRING
+	.dc.b	CR,LF,CR,LF,0
+	.even
+
+
+*----------------------------------------------------------------------------------------------
+dummyEntrance:
+	bsr	title
+	
+	clr.w	-(sp)
+	DOS	__EXIT2
+
+	.end

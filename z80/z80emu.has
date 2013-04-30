@@ -1,0 +1,311 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+	.include	doscall.mac
+	.include	z80emu.equ
+	.include	z80emu.mac
+.if MPU.eq.68000
+	.include	../work/000/flagtbl.equ
+.else
+	.fail 1
+.endif
+	.include	../IO/io.equ
+	.include	../IO/x68k.equ
+
+	.xdef	Z80exec,_Zjmp
+	.xdef	_PatNameUpdateTbl
+
+	.xref	Zjmp,Z80mem
+	.xref	Ftbl,FtblinIO
+	.xref	FtblADD8,FtblSUB8
+	.xref	PCGdatatbl,table_PCGtoGRAPH,table_PCGtoXPCG
+	.xref	FlagDebuggerON,FlagBreakPoint,BreakPoint
+	.xref	KeyInterrupt,_Org_KeyInterrupt
+	.xref	NMIroutine,_Org_NMIintr
+	.xref	COPYinterrupt,_Org_COPYintr
+	.xref	_noKeyInt
+
+	.text
+	.even
+
+
+
+.if	PASS.eq.2
+OP_CB		.equ	Xs_CB00-_Zjmp
+OP_DD		.equ	Xs_DD00-_Zjmp		* IX
+OP_DDCB		.equ	Xs_DDCB00-_Zjmp		* IX
+OP_ED		.equ	Xs_ED00-_Zjmp
+OP_FD		.equ	OP_DD			* IY
+.else
+OP_CB		.equ	1
+OP_DD		.equ	1
+OP_DDCB		.equ	1
+OP_ED		.equ	1
+OP_FD		.equ	1
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+Z80exec:
+	*-- regAdr の設定
+	move.l	(Z80mem),regAdr
+	
+	*-- regFtbl の設定
+	lea	Ftbl,sp			* regFtbl
+	
+	*-- スーパーバイザモードへ
+	clr.l	-(sp)
+	DOS	__SUPER
+	addq.l	#4,sp
+	
+	*-- regZjmp の設定
+	movea.l	(Zjmp),regZjmp
+	
+	*-- A,A'レジスタの設定
+	moveq.l	#0,regA
+	move.b	(ZregA2),regA
+	swap.w	regA
+	move.b	(ZregA),regA
+	
+	*-- F,F'レジスタの設定
+	moveq.l	#0,regF
+	move.b	(ZregF2),regF
+	swap.w	regF
+	move.b	(ZregF),regF
+	
+	*-- BC,BC'レジスタの設定
+	move.w	(ZregBC),regAdr
+	move.l	regAdr,regBC
+	move.w	(ZregBC2),workBC2(regFtbl)
+	
+	*-- DE,DE'レジスタの設定
+	move.w	(ZregDE),regAdr
+	move.l	regAdr,regDE
+	move.w	(ZregDE2),workDE2(regFtbl)
+	
+	*-- HL,HL'レジスタの設定
+	move.w	(ZregHL),regAdr
+	move.l	regAdr,regHL
+	move.w	(ZregHL2),workHL2(regFtbl)
+	
+	*-- IX,IYレジスタの設定
+	move.w	(ZregIX),workIX(regFtbl)
+	move.w	(ZregIY),workIY(regFtbl)
+	
+	*-- SPレジスタの設定
+	move.w	(ZregSP),regAdr
+	move.l	regAdr,regSP
+	
+	*-- PCレジスタの設定
+	move.w	(ZregPC),regAdr
+	move.l	regAdr,regPC
+	
+	*-- d1.l レジスタクリア (上位ワードが０である必要があるため)
+	moveq.l	#0,d1
+	
+	
+.if 0
+	*-- メモリマッパ用ワークの初期化
+	jsr	initMemoryMapper(regFtbl)
+	
+	*-- スロット 0-0 を Z80 メモリ空間に切り替える
+	jsr	initZ80mem(regFtbl)
+.else
+	move.w	InitSlotRoutine(regZjmp),d1
+	jsr	(regFtbl,d1.l)
+.endif
+	
+	;-- SCC ワークの初期化
+	tst.w	OutputSCC(regZjmp)
+	bne.s	@f
+	move.w	#DummyRoutine,OutputSCC(regZjmp)
+@@:	
+	
+	;-- PSG の初期化
+	move.w	#PSG_ProcTable,PSGreg(regZjmp)
+	
+	move.w	InitSoundRoutine(regZjmp),d1
+	beq.s	@f
+	jsr	(regFtbl,d1.l)
+@@:
+	
+	*-- VDP の初期化
+	jsr	initVDP(regFtbl)
+	
+	*-- 
+	move.w	#$08,(regOP1fetch)
+	move.b	#$04,Z80INTREQ(regFtbl)
+	
+	*-- デバッガ起動 ?
+	tst.w	FlagDebuggerON
+	beq	@f
+	move.w	#IN_Z80DEBUGGER,(regOP1fetch)
+	move.b	#IN_Z80DEBUGGER,Z80INTREQ(regFtbl)
+@@:
+	
+	;-- ブレイクポイントあり ?
+	tst.w	FlagBreakPoint
+	beq	@f
+	
+	move.w	(BreakPoint),breakPoint_1(regFtbl)
+	move.l	breakPoint(regFtbl),w_breakPoint(regFtbl)
+@@:
+	
+	*-- キーボード入力処理ルーチン登録
+	tst.b	(_noKeyInt)
+	bne	@f
+	
+	pea.l	KeyInterrupt			* キー入力処理
+	move.w	#VECTOR_KEYINT,-(sp)		* 
+	DOS	__INTVCS
+	addq.w	#6,sp
+	
+	move.l	d0,(_Org_KeyInterrupt)
+@@:
+	
+	*-- インタラプトスイッチ処理の登録
+	pea.l	NMIroutine
+	move.w	#VECTOR_NMI,-(sp)
+	DOS	__INTVCS
+	addq.w	#6,sp
+	
+	move.l	d0,(_Org_NMIintr)
+	
+	*-- コピーキーの処理
+	pea.l	COPYinterrupt
+	move.w	#VECTOR_COPYINT,-(sp)
+	DOS	__INTVCS
+	addq.w	#6,sp
+	
+	move.l	d0,(_Org_COPYintr)
+	
+.if 0	*--- v test v test v test v test v
+	; ROM デバッガ起動
+	movem.l	d0-d7/a0-a6,-(sp)
+	movea.l	$ff0008,a0
+	lea.l	$1000.w,a6
+	jsr	(a0)
+	movem.l	(sp)+,d0-d7/a0-a6
+.endif	*--- ^ test ^ test ^ test ^ test ^
+	
+	
+	FETCH
+
+
+
+*----------------------------------------------------------------------------------------------
+* Z80 エミュレートコード
+
+	.text
+
+opcode		macro num
+Xs_&num:
+op_group: = $&num>>8
+op_num:   = $&num.and.$ff
+endm
+
+endopcode	macro num
+Xe_&num:
+endm
+
+VRAMwrite	.macro num
+VWs_&num:
+endm
+
+EndVRAMwrite	.macro num
+VWe_&num:
+endm
+
+VRAMsetAdr	.macro num
+VSs_&num:
+endm
+
+EndVRAMsetAdr	.macro num
+VSe_&num:
+endm
+
+
+	.if PASS.eq.1
+		.include z80emu.inc
+		_Zjmp:
+	.else
+		.if MPU.eq.68000
+			.include ../work/000/z80emu.tmp
+		.else
+			.fail 1
+		.endif
+	.endif
+
+
+*----------------------------------------------------------------------------------------------
+* VRAM write
+
+	.if PASS.eq.1
+		.include	../IO/vramwrite.inc
+	.else
+		.if MPU.eq.68000
+			.include ../work/000/vramwrite.tmp
+		.else
+			.fail 1
+		.endif
+	.endif
+
+
+;-- パターンネーム変更テーブル
+_PatNameUpdateTbl:	.dcb.w	4*1024,-1
+
+;-----
+_endOpcode:
+
+
+*----------------------------------------------------------------------------------------------
+* リロケート用領域
+*
+*		+----------------------+
+*		| Z80emu    (32Kbytes) |
+*    regZjmp -> +----------------------+ <-- 下位ワードが $0100 のアドレスにリロケート
+*		| Z80emu    (32Kbytes) |
+*		+----------------------+
+*		| VRAMwrite (32Kbytes) |
+*		+----------------------+
+*		| リロケート用領域     |
+*		|           (64Kbytes) |
+*		+----------------------+
+
+	.dcb.b 32768,0
+	.dcb.b 32768,0
+
+
+
+	;-- アップデートテーブル等の領域
+	.dcb.b	16*1024,0
+
+
+*----------------------------------------------------------------------------------------------
+	.data
+	.even
+
+ZregA:		.dc.b	0
+ZregF:		.dc.b	0
+ZregBC:		.dc.w	0
+ZregDE:		.dc.w	0
+ZregHL:		.dc.w	0
+
+ZregA2:		.dc.b	0
+ZregF2:		.dc.b	0
+ZregBC2:	.dc.w	0
+ZregDE2:	.dc.w	0
+ZregHL2:	.dc.w	0
+
+ZregIX:		.dc.w	0
+ZregIY:		.dc.w	0
+
+ZregSP:		.dc.w	0
+ZregPC:		.dc.w	0
+
+
+	.end

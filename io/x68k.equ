@@ -1,0 +1,111 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+
+;--
+;;GRA2_LOWRESO		.equ	1
+
+
+
+*-- Interrupt Vector
+VECTOR_NMI	.equ	$1f
+VECTOR_COPYINT	.equ	$2c
+VECTOR_KEYINT	.equ	$4c
+VECTOR_RASTER	.equ	$4e	;MFP GPIP6 ラスタ割り込み
+
+
+*-- Human68k works
+HumanKeyTable	.equ	$800
+
+
+*-- Text Video Ram
+TVRAM		.equ	$e00000
+TPALETTE	.equ	$e82200
+
+*-- Graphic Video Ram
+GVRAM_16_P0	.equ	$c00000
+GVRAM_16_P1	.equ	$c80000
+GVRAM_16_P2	.equ	$d00000
+GVRAM_16_P3	.equ	$d80000
+
+GVRAM_256_P0	.equ	$c00000
+GVRAM_256_P1	.equ	$c80000
+
+GVRAM_65536_P0	.equ	$c00000
+
+;-- Scroll register
+TScroll_X	.equ	$e80014
+TScroll_Y	.equ	$e80016
+GScroll_X0	.equ	$e80018
+GScroll_Y0	.equ	$e8001a
+GScroll_X1	.equ	$e8001c
+GScroll_Y1	.equ	$e8001e
+GScroll_X2	.equ	$e80020
+GScroll_Y2	.equ	$e80022
+GScroll_X3	.equ	$e80024
+GScroll_Y3	.equ	$e80026
+
+*-- Palette table
+GPALETTE	.equ	$e82000
+
+*-- MFP
+MFP_GPIP	.equ	$e88001
+MFP_TSR		.equ	$e8802d
+MFP_UDR		.equ	$e8802f
+
+*-- Back Ground
+SprScrollReg	.equ	$eb0000
+PCGarea		.equ	$eb8000
+SprPCGarea	.equ	$eba000
+BGDATAarea	.equ	$ebc000
+
+BGcontrol	.equ	$eb0808
+
+*-- CRT Controler
+CRTC_R0		.equ	$e80000
+CRTC_R09	.equ	$e80012		;R09 ラスタ番号
+CRTC_R20	.equ	$e80028
+CRTC_R21	.equ	$e8002a
+CRTC_R23	.equ	$e8002e		;テキストアクセスマスク
+
+O_CRTC_R0	.equ	0
+O_CRTC_R1	.equ	1*2
+O_CRTC_R2	.equ	2*2
+O_CRTC_R3	.equ	3*2
+O_CRTC_R4	.equ	4*2
+O_CRTC_R5	.equ	5*2
+O_CRTC_R6	.equ	6*2
+O_CRTC_R7	.equ	7*2
+O_CRTC_R20	.equ	20*2
+
+*-- Video Controler
+VideoCtrl_R0	.equ	$e82400
+VideoCtrl_R1	.equ	$e82500
+VideoCtrl_R2	.equ	$e82600
+
+*-- System Port
+SYSPORT_4	.equ	$e8e007
+
+*-- Sprite Controler
+SpCtrl_H_TOTAL	.equ	$eb080a
+SpCtrl_H_DISP	.equ	$eb080c
+SpCtrl_V_DISP	.equ	$eb080e
+SpCtrl_RES	.equ	$eb0810
+
+;-- MFP
+MFP_IERB	.equ	$e88009
+MFP_IPRB	.equ	$e8800d
+
+;-- OPM
+OPM_Address	.equ	$e90001		; OPM アドレスポート
+OPM_Data	.equ	$e90003		; OPM データポート
+
+;-- Joystick
+Joystick1	.equ	$e9a001
+Joystick2	.equ	$e9a003
+
+

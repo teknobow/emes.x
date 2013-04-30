@@ -1,0 +1,319 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+USE_DEBUGGER	.equ 1
+
+CHECK_0xFFFF	.equ 1
+
+DISABLE_ROM_WRITE	.equ 1
+
+
+;;;	.global	Zjmp,Z80mem
+
+
+*--- レジスタ
+regIXY		reg	a1
+regVadr		reg	a2
+regIO		reg	a3
+regZjmp		reg	a4
+regPC		reg	a5
+regSP		reg	a6
+regSwap		reg	a7
+regZeroSwap	reg	a4
+regFtbl		reg	a7
+regOP1fetch	reg	a7
+regOP2fetch	reg	a4
+
+regAdr		reg	d2
+regA		reg	d3
+regF		reg	d4
+regBC		reg	d5
+regDE		reg	d6
+regHL		reg	d7
+
+
+*--- フラグ	 CSZc H VN
+flag_S	.equ	%0100_0000
+flag_Z	.equ	%0010_0000
+flag_H	.equ	%0000_1000
+flag_PV	.equ	%0000_0010
+flag_P	.equ	flag_PV
+flag_V	.equ	flag_PV
+flag_N	.equ	%0000_0001
+flag_Cc	.equ	%1001_0000
+flag_C	.equ	%1000_0000
+flag_c	.equ	%0001_0000
+
+S	.equ	flag_S
+Z	.equ	flag_Z
+H	.equ	flag_H
+V	.equ	flag_V
+N	.equ	flag_N
+C	.equ	flag_C
+c	.equ	flag_c
+_	.equ	0
+
+Z80FLAG	.macro flg
+	lab: = 0
+	.irpc ch,flg
+	lab: = ch.or.lab
+	.endm
+	set&flg: .equ %lab
+	.endm
+
+
+	Z80FLAG	________
+	Z80FLAG	_______C
+	Z80FLAG	_______Cc
+	Z80FLAG	______N_
+	Z80FLAG	______NC
+	Z80FLAG	______NCc
+	Z80FLAG	_____V__
+	Z80FLAG	_____V_C
+	Z80FLAG	_____V_Cc
+	Z80FLAG	_____VN_
+	Z80FLAG	_____VNC
+	Z80FLAG	_____VNCc
+	Z80FLAG	___H____
+	Z80FLAG	___H___C
+	Z80FLAG	___H___Cc
+	Z80FLAG	___H__N_
+	Z80FLAG	___H__NC
+	Z80FLAG	___H__NCc
+	Z80FLAG	___H_V__
+	Z80FLAG	___H_V_C
+	Z80FLAG	___H_V_Cc
+	Z80FLAG	___H_VN_
+	Z80FLAG	___H_VNC
+	Z80FLAG	___H_VNCc
+	Z80FLAG	_Z______
+	Z80FLAG	_Z_____C
+	Z80FLAG	_Z_____Cc
+	Z80FLAG	_Z____N_
+	Z80FLAG	_Z____NC
+	Z80FLAG	_Z____NCc
+	Z80FLAG	_Z___V__
+	Z80FLAG	_Z___V_C
+	Z80FLAG	_Z___V_Cc
+	Z80FLAG	_Z___VN_
+	Z80FLAG	_Z___VNC
+	Z80FLAG	_Z___VNCc
+	Z80FLAG	_Z_H____
+	Z80FLAG	_Z_H___C
+	Z80FLAG	_Z_H___Cc
+	Z80FLAG	_Z_H__N_
+	Z80FLAG	_Z_H__NC
+	Z80FLAG	_Z_H__NCc
+	Z80FLAG	_Z_H_V__
+	Z80FLAG	_Z_H_V_C
+	Z80FLAG	_Z_H_V_Cc
+	Z80FLAG	_Z_H_VN_
+	Z80FLAG	_Z_H_VNC
+	Z80FLAG	_Z_H_VNCc
+	Z80FLAG	S_______
+	Z80FLAG	S______C
+	Z80FLAG	S______Cc
+	Z80FLAG	S_____N_
+	Z80FLAG	S_____NC
+	Z80FLAG	S_____NCc
+	Z80FLAG	S____V__
+	Z80FLAG	S____V_C
+	Z80FLAG	S____V_Cc
+	Z80FLAG	S____VN_
+	Z80FLAG	S____VNC
+	Z80FLAG	S____VNCc
+	Z80FLAG	S__H____
+	Z80FLAG	S__H___C
+	Z80FLAG	S__H___Cc
+	Z80FLAG	S__H__N_
+	Z80FLAG	S__H__NC
+	Z80FLAG	S__H__NCc
+	Z80FLAG	S__H_V__
+	Z80FLAG	S__H_V_C
+	Z80FLAG	S__H_V_Cc
+	Z80FLAG	S__H_VN_
+	Z80FLAG	S__H_VNC
+	Z80FLAG	S__H_VNCc
+	Z80FLAG	SZ______
+	Z80FLAG	SZ_____C
+	Z80FLAG	SZ_____Cc
+	Z80FLAG	SZ____N_
+	Z80FLAG	SZ____NC
+	Z80FLAG	SZ____NCc
+	Z80FLAG	SZ___V__
+	Z80FLAG	SZ___V_C
+	Z80FLAG	SZ___V_Cc
+	Z80FLAG	SZ___VN_
+	Z80FLAG	SZ___VNC
+	Z80FLAG	SZ___VNCc
+	Z80FLAG	SZ_H____
+	Z80FLAG	SZ_H___C
+	Z80FLAG	SZ_H___Cc
+	Z80FLAG	SZ_H__N_
+	Z80FLAG	SZ_H__NC
+	Z80FLAG	SZ_H__NCc
+	Z80FLAG	SZ_H_V__
+	Z80FLAG	SZ_H_V_C
+	Z80FLAG	SZ_H_V_Cc
+	Z80FLAG	SZ_H_VN_
+	Z80FLAG	SZ_H_VNC
+	Z80FLAG	SZ_H_VNCc
+
+OP_Z		.equ	2
+
+VRAM_WRITE	.equ	18
+VRAM_SET_ADR	.equ	-122
+
+
+.if USE_DEBUGGER
+IN_Z80DEBUGGER	.equ	0
+.endif
+
+*-- 割り込み禁止状態 (LD A,R  LD A,I 用に flag_P を設定)
+ENABLE_INT	.equ	flag_P
+
+Z80_SUSPEND_INTR .equ	0
+
+
+O_CHKROM	.equ	-2		; RAM/ROM check
+FtblINCrh	.equ	-3
+FtblDECrh	.equ	-5
+tblADCrh	.equ	-7
+tblSBCrh	.equ	tblADCrh
+FtblRLCrh	.equ	-9
+FtblRRCrh	.equ	-11
+FtblRLrh	.equ	-13
+FtblSLArh	.equ	FtblRLrh
+FtblRRrh	.equ	-15
+FtblSRLrh	.equ	FtblRRrh
+FtblSRArh	.equ	-17
+.if DISABLE_ROM_WRITE.eq.1
+;;O_CHKROM	.equ	-18		* RAM/ROMチェック
+.endif
+
+SPECIAL_PROC	.equ	-20
+CHK_SPECIAL_ADR	.equ	-22
+
+VRAM_BLOCK_HIGH	.equ	-24
+VRAM_BLOCK_LOW	.equ	-26
+VRAM_BLOCK	.equ	VRAM_BLOCK_LOW
+
+
+MARK_VRAM_LOW	.equ	0
+MARK_VRAM_HIGH	.equ	2
+
+
+*--
+ZADR_PAGE0	.equ	$0000
+ZADR_PAGE1	.equ	$4000
+ZADR_PAGE2	.equ	$8100		* O_CHKROMと組み合わせた場合に値が食い違うので
+ZADR_PAGE3	.equ	$c000
+
+
+*-- regZjmp相対ワークエリア
+RELWORK	.macro label
+	label:	.equ IDX_RELWORK
+	IDX_RELWORK: = IDX_RELWORK+$0100
+.endm
+
+
+N_RELWORK .macro label
+	label:	.equ IDX_N_RELWORK
+	IDX_N_RELWORK: = IDX_N_RELWORK-$0100
+.endm
+
+
+IDX_RELWORK: = $0100
+IDX_N_RELWORK: = $ff00
+
+	RELWORK InitSlotRoutine		; スロットドライバ初期化ルーチン
+	RELWORK ChangeSlotRoutine	; 基本スロット切り替えルーチン
+	RELWORK ChangeMemMapRoutine_Page0
+	RELWORK ChangeMemMapRoutine_Page1
+	RELWORK ChangeMemMapRoutine_Page2
+	RELWORK ChangeMemMapRoutine_Page3
+	
+	RELWORK	SlotPage0
+	RELWORK	SlotPage1
+	RELWORK	SlotPage2
+	RELWORK	SlotPage3
+	RELWORK	IdxMemMapPage0
+	RELWORK	IdxMemMapPage1
+	RELWORK	IdxMemMapPage2
+	RELWORK	IdxMemMapPage3
+	RELWORK	MapMemoryPage0
+	RELWORK	MapMemoryPage1
+	RELWORK	MapMemoryPage2
+	RELWORK	MapMemoryPage3
+	
+	RELWORK SAVE_regAdr
+	RELWORK SAVE_IXYh
+	
+	RELWORK IOdata_A8		* 基本スロット選択レジスタ設定値
+	RELWORK KeyScanGroup		* キーボードスキャン信号
+	RELWORK PPIportC		* PPI port B キーボードスキャン信号
+	
+	RELWORK ClockIC_modeReg		* CLOCK IC
+	RELWORK ClockIC_adr		* CLOCK IC
+	RELWORK ClockIC_block		* CLOCK IC
+	
+	
+	RELWORK ChangeMegaROM_Page1Low
+	RELWORK ChangeMegaROM_Page1High
+	RELWORK ChangeMegaROM_Page2Low_wP1
+	RELWORK ChangeMegaROM_Page2Low_wP2
+	RELWORK ChangeMegaROM_Page2High_wP1
+	RELWORK ChangeMegaROM_Page2High_wP2
+	RELWORK ChangeMegaROM_Page1
+	RELWORK ChangeMegaROM_Page2
+	
+	RELWORK ROMTYPE_NORM
+	N_RELWORK MEMTYPE_VOID		; $ff00 : 未実装メモリ
+	.fail MEMTYPE_VOID.ne.$ff00
+	
+	RELWORK InitSoundRoutine	; サウンド処理初期化ルーチン
+	
+	N_RELWORK OutputSCC		; SCC 設定
+	
+	;-- PSG
+	RELWORK PSGreg			; PSG レジスタ番号
+	
+	RELWORK PSG_chA_pitch		; R01:R00
+	RELWORK PSG_chB_pitch		; R03:R02
+	RELWORK PSG_chC_pitch		; R05:R04
+	RELWORK PSG_noise_pitch		; R06
+	RELWORK PSG_enable		; R07
+	RELWORK PSG_chA_volume		; R08
+	RELWORK PSG_chB_volume		; R09
+	RELWORK PSG_chC_volume		; R10
+	RELWORK PSG_env_cycle		; R12:R11
+	RELWORK PSG_env_form		; R13
+	RELWORK PSG_reg14		; R14
+	RELWORK PSG_reg15		; R15
+	
+	RELWORK SAVE_D7			; d7.w 保存用
+
+
+;----------------------------------------------------------------------------------------------
+FETCH	.macro
+	move.b	(regPC)+,(regOP1fetch)		* 12 (2)
+	move.w	(regOP1fetch),d1		*  8 (2)
+	jmp	OP_Z(regZjmp,d1.w)		* 14 (4) = 34
+	
+	
+	* データレジスタが余ってないから NG
+**	move.b	(regPC)+,(regOP1fetch)		* 12
+**	move.w	(regOP1fetch),dn		*  8
+**	movea.l	dn,a0				*  4
+**	jmp	(a0)				*  8
+	
+	
+	* 68000専用　（割り込み処理なし. 自己書き替え)
+**	lea	XX(pc),a0			*  8
+**	move.b	(regPC)+,(a0)			* 12
+**	jmp	XX(regZjmp)			* 10
+.endm

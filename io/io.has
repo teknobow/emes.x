@@ -1,0 +1,1193 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+	.include io.equ
+	.include ../Z80/z80emu.equ
+	.if MPU.eq.68000
+		.include ../work/000/flagtbl.equ
+	.else
+		.fail 1
+	.endif
+	.include vdp.equ
+	.include x68k.equ
+
+
+	.xdef	TXT1_H_IOroutine,TXT1_L_IOroutine
+	.xdef	TXT2_H_IOroutine,TXT2_L_IOroutine
+	.xdef	MLT_H_IOroutine,MLT_L_IOroutine
+	.xdef	GRA1_H_IOroutine,GRA1_L_IOroutine
+	.xdef	GRA2_H_IOroutine,GRA2_L_IOroutine
+	.xdef	GRA3_H_IOroutine,GRA3_L_IOroutine
+	.xdef	GRA4_H_IOroutine,GRA4_L_IOroutine
+	.xdef	GRA5_H_IOroutine,GRA5_L_IOroutine
+	.xdef	GRA6_H_IOroutine,GRA6_L_IOroutine
+	.xdef	GRA7_H_IOroutine,GRA7_L_IOroutine
+
+
+*	MSX1screen:	TEXT1
+*			MULTI_COLOR
+*			GRAPHIC1
+*			GRAPHIC2
+*
+*	MSX2screen:	TEXT2
+*			GRAPHIC3
+*			GRAPHIC4
+*			GRAPHIC5
+*			GRAPHIC6
+*			GRAPHIC7
+
+
+
+PortIn .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1in_Ls&num:
+		.else
+			TX1in_Hs&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2in_Ls&num:
+		.else
+			TX2in_Hs&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTin_Ls&num:
+		.else
+			MLTin_Hs&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1in_Ls&num:
+		.else
+			GR1in_Hs&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2in_Ls&num:
+		.else
+			GR2in_Hs&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3in_Ls&num:
+		.else
+			GR3in_Hs&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4in_Ls&num:
+		.else
+			GR4in_Hs&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5in_Ls&num:
+		.else
+			GR5in_Hs&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6in_Ls&num:
+		.else
+			GR6in_Hs&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7in_Ls&num:
+		.else
+			GR7in_Hs&num:
+		.endif
+	.endif
+.endm
+
+EndPortIn .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1in_Le&num:
+		.else
+			TX1in_He&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2in_Le&num:
+		.else
+			TX2in_He&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTin_Le&num:
+		.else
+			MLTin_He&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1in_Le&num:
+		.else
+			GR1in_He&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2in_Le&num:
+		.else
+			GR2in_He&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3in_Le&num:
+		.else
+			GR3in_He&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4in_Le&num:
+		.else
+			GR4in_He&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5in_Le&num:
+		.else
+			GR5in_He&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6in_Le&num:
+		.else
+			GR6in_He&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7in_Le&num:
+		.else
+			GR7in_He&num:
+		.endif
+	.endif
+.endm
+
+PortOut .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1out_Ls&num:
+		.else
+			TX1out_Hs&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2out_Ls&num:
+		.else
+			TX2out_Hs&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTout_Ls&num:
+		.else
+			MLTout_Hs&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1out_Ls&num:
+		.else
+			GR1out_Hs&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2out_Ls&num:
+		.else
+			GR2out_Hs&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3out_Ls&num:
+		.else
+			GR3out_Hs&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4out_Ls&num:
+		.else
+			GR4out_Hs&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5out_Ls&num:
+		.else
+			GR5out_Hs&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6out_Ls&num:
+		.else
+			GR6out_Hs&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7out_Ls&num:
+		.else
+			GR7out_Hs&num:
+		.endif
+	.endif
+.endm
+
+EndPortOut .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1out_Le&num:
+		.else
+			TX1out_He&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2out_Le&num:
+		.else
+			TX2out_He&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTout_Le&num:
+		.else
+			MLTout_He&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1out_Le&num:
+		.else
+			GR1out_He&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2out_Le&num:
+		.else
+			GR2out_He&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3out_Le&num:
+		.else
+			GR3out_He&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4out_Le&num:
+		.else
+			GR4out_He&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5out_Le&num:
+		.else
+			GR5out_He&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6out_Le&num:
+		.else
+			GR6out_He&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7out_Le&num:
+		.else
+			GR7out_He&num:
+		.endif
+	.endif
+.endm
+
+SetVDPreg .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1vdp_Ls&num:
+		.else
+			TX1vdp_Hs&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2vdp_Ls&num:
+		.else
+			TX2vdp_Hs&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTvdp_Ls&num:
+		.else
+			MLTvdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1vdp_Ls&num:
+		.else
+			GR1vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2vdp_Ls&num:
+		.else
+			GR2vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3vdp_Ls&num:
+		.else
+			GR3vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4vdp_Ls&num:
+		.else
+			GR4vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5vdp_Ls&num:
+		.else
+			GR5vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6vdp_Ls&num:
+		.else
+			GR6vdp_Hs&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7vdp_Ls&num:
+		.else
+			GR7vdp_Hs&num:
+		.endif
+	.endif
+.endm
+
+EndSetVDPreg .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1vdp_Le&num:
+		.else
+			TX1vdp_He&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2vdp_Le&num:
+		.else
+			TX2vdp_He&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTvdp_Le&num:
+		.else
+			MLTvdp_He&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1vdp_Le&num:
+		.else
+			GR1vdp_He&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2vdp_Le&num:
+		.else
+			GR2vdp_He&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3vdp_Le&num:
+		.else
+			GR3vdp_He&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4vdp_Le&num:
+		.else
+			GR4vdp_He&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5vdp_Le&num:
+		.else
+			GR5vdp_He&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6vdp_Le&num:
+		.else
+			GR6vdp_He&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7vdp_Le&num:
+		.else
+			GR7vdp_He&num:
+		.endif
+	.endif
+.endm
+
+
+StatusReg .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1sreg_Ls&num:
+		.else
+			TX1sreg_Hs&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2sreg_Ls&num:
+		.else
+			TX2sreg_Hs&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTsreg_Ls&num:
+		.else
+			MLTsreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1sreg_Ls&num:
+		.else
+			GR1sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2sreg_Ls&num:
+		.else
+			GR2sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3sreg_Ls&num:
+		.else
+			GR3sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4sreg_Ls&num:
+		.else
+			GR4sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5sreg_Ls&num:
+		.else
+			GR5sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6sreg_Ls&num:
+		.else
+			GR6sreg_Hs&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7sreg_Ls&num:
+		.else
+			GR7sreg_Hs&num:
+		.endif
+	.endif
+.endm
+
+EndStatusReg .macro num
+	.if	TEXT1
+		.if VRAM_LOW
+			TX1sreg_Le&num:
+		.else
+			TX1sreg_He&num:
+		.endif
+	.elseif	TEXT2
+		.if VRAM_LOW
+			TX2sreg_Le&num:
+		.else
+			TX2sreg_He&num:
+		.endif
+	.elseif	MULTI_COLOR
+		.if VRAM_LOW
+			MLTsreg_Le&num:
+		.else
+			MLTsreg_He&num:
+		.endif
+	.elseif	GRAPHIC1
+		.if VRAM_LOW
+			GR1sreg_Le&num:
+		.else
+			GR1sreg_He&num:
+		.endif
+	.elseif	GRAPHIC2
+		.if VRAM_LOW
+			GR2sreg_Le&num:
+		.else
+			GR2sreg_He&num:
+		.endif
+	.elseif	GRAPHIC3
+		.if VRAM_LOW
+			GR3sreg_Le&num:
+		.else
+			GR3sreg_He&num:
+		.endif
+	.elseif	GRAPHIC4
+		.if VRAM_LOW
+			GR4sreg_Le&num:
+		.else
+			GR4sreg_He&num:
+		.endif
+	.elseif	GRAPHIC5
+		.if VRAM_LOW
+			GR5sreg_Le&num:
+		.else
+			GR5sreg_He&num:
+		.endif
+	.elseif	GRAPHIC6
+		.if VRAM_LOW
+			GR6sreg_Le&num:
+		.else
+			GR6sreg_He&num:
+		.endif
+	.elseif	GRAPHIC7
+		.if VRAM_LOW
+			GR7sreg_Le&num:
+		.else
+			GR7sreg_He&num:
+		.endif
+	.endif
+.endm
+
+
+
+	.text
+
+*----------------------------------------------------------------------------------------------
+if PASS.eq.1
+	TXT1_H_IOroutine:
+	TXT1_L_IOroutine:
+	TXT2_H_IOroutine:
+	TXT2_L_IOroutine:
+	MLT_H_IOroutine:
+	MLT_L_IOroutine:
+	GRA1_H_IOroutine:
+	GRA1_L_IOroutine:
+	GRA2_H_IOroutine:
+	GRA2_L_IOroutine:
+	GRA3_H_IOroutine:
+	GRA3_L_IOroutine:
+	GRA4_H_IOroutine:
+	GRA4_L_IOroutine:
+	GRA5_H_IOroutine:
+	GRA5_L_IOroutine:
+	GRA6_H_IOroutine:
+	GRA6_L_IOroutine:
+	GRA7_H_IOroutine:
+	GRA7_L_IOroutine:
+.endif
+
+*----------------------------------------------------------------------------------------------
+* TEXT 1
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 1
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 1
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+
+*----------------------------------------------------------------------------------------------
+* TEXT 2
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+;MSX1screen	= 0
+;MSX2screen	= 1
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 1
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+;MSX1screen	= 0
+;MSX2screen	= 1
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 1
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* MULTI_COLOR
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 1
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 1
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 1
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 1
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 1
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 2
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 1
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 1
+MSX2screen	= 0
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 1
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 3
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 1
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 1
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 4
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 1
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 1
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 5
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 1
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 1
+GRAPHIC6	= 0
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 6
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 1
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 1
+GRAPHIC7	= 0
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 7
+
+VRAM_LOW	= 1
+VRAM_HIGH	= 0
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 1
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+*----------------------------
+
+VRAM_LOW	= 0
+VRAM_HIGH	= 1
+
+MSX1screen	= 0
+MSX2screen	= 1
+
+TEXT1		= 0
+TEXT2		= 0
+MULTI_COLOR	= 0
+GRAPHIC1	= 0
+GRAPHIC2	= 0
+GRAPHIC3	= 0
+GRAPHIC4	= 0
+GRAPHIC5	= 0
+GRAPHIC6	= 0
+GRAPHIC7	= 1
+
+.if PASS.eq.1
+	.include io.inc
+.else
+	.if MPU.eq.68000
+		.include ../work/000/io.tmp
+	.else
+		.fail 1
+	.endif
+.endif
+
+
+

@@ -1,0 +1,1539 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+	.xdef GRA2_VDISP_interrupt_r
+	.xdef GRA2_BL1_RASTER_interrupt
+
+
+
+	;ScreenRefresh
+	;PatGenTblUpdate ... Block 0 更新時
+	
+	;TBlkPatNameTblUpdate
+	;TBlkPatGenTblUpdate
+	
+	
+	;SprPatGenTblUpdate
+	;SprAtrTblUpdate
+
+
+oText: = 11*1024*8+8*8
+
+
+GRA2_VDISP_interrupt_r:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA2_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+;;	;-- Disp ON, BG0 ON
+;;	move.w	#%0000_0010_0000_0001,(BGcontrol)	* 
+	
+
+	;-- TEXT Palette 0 を設定
+	move.w	GRA2_backDropColor(a6),(TPALETTE)	* 
+	
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA2_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	;-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA2_refreshScreen			* 10/ 8 (T/F)
+	
+	
+	*-- SprPatGenTbl 変更あり ?
+	tas	SprPatGenTblUpdate(a6)			* 18
+	jbpl	GRA2_SprPatGenUpdate			* 
+	
+GRA2_checkSprAtr:
+	*-- SprAtrTbl 変更あり ?
+	tas	SprAtrTblUpdate(a6)			* 18
+	jbpl	GRA2_SprAtrUpdate			*
+	
+GRA2_checkPat:
+	;-- BLOCK 1 : PCG設定 ?
+;	tas	PatGenTblUpdate(a6)			* 18
+;	bpl	GRA2_updateBlock0			* 10
+	
+	;-- BLOCK 2,3 : パターンネームテーブル更新 ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	GRA2_updateTBlkPatName			* 
+	
+	;-- BLOCK 2,3 : パターンジェネレータ/カラーテーブル更新 ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	GRA2_updateTBlkPatGen			* 
+	
+	
+	
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA2_procInt:
+	
+.ifdef DEBUG_GRA2
+	move.w	#%00000_00000_00000_0,(TPALETTE+15*2)	* 
+.endif
+	
+	
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	RESTORE_STACK					* 
+GRA2_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	;-- 画面再表示 -------------------------------------
+GRA2_refreshScreen:
+	
+.ifdef DEBUG_GRA2
+	move.w	#%11111_00000_00000_1,(TPALETTE+15*2)	* G
+.endif
+	
+	
+	*-- フラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatNameTblUpdate(a6)			* 12
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	
+	move.w	d0,SprPatGenTblUpdate(a6)		* 12
+	move.w	d0,SprAtrTblUpdate(a6)			* 12
+	
+	*-- スプライト/BG 非表示
+;;	move.b	(BGcontrol),d7				* 16
+;;	clr.b	(BGcontrol)				* 20
+	
+	
+	*-- BGデータエリア設定 (BLOCK 0) -------------------
+	
+	*-- BGデータエリアの先頭アドレス
+	lea	BGDATAarea,a0				* 12
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a1			* 16
+	
+	*-- BGデータエリア設定
+	move.w	#$100,d0				*  8
+	moveq.l	#8-1,d1					*  4
+@@:
+	.rept	32
+	move.b	(a1)+,d0				*  8
+	move.w	d0,(a0)+				*  8
+	.endm
+	
+	lea	32*2(a0),a0				*  8
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- PCG設定 (BLOCK 0) ------------------------------
+	
+	*-- PCGエリアの先頭アドレス
+	lea	PCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	table_PCGtoXPCG,a1			* 12
+	
+	*-- PatGenTbl の先頭アドレス
+	movea.l	PatGenTbl(a6),a2			* 16
+	
+	*-- ColorTbl の先頭アドレス
+	movea.l	ColorTbl(a6),a3				* 16
+	
+	*-- PCG設定
+	move.w	#256-1,d5				*  8
+@@:
+	.rept 4
+	moveq.l	#0,d0					*  4
+	;-- PatGenTbl
+	move.w	(a2)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	;-- ColorTbl
+	move.b	(a3)+,d0				*  8
+	;-- PCG
+	lsl.l	#2,d0					* 12
+	move.l	(a1,d0.l),(a0)+				* 26
+	
+	moveq.l	#0,d0					*  4
+	;-- PatGenTbl
+	move.w	(sp)+,d0				*  8
+	;-- ColorTbl
+	move.b	(a3)+,d0				*  8
+	;-- PCG
+	lsl.l	#2,d0					* 12
+	move.l	(a1,d0.l),(a0)+				* 26 = 124 * 4 = 496
+	.endm
+	
+	dbra	d5,@b					* 10/14 (T/F)
+	
+	
+	;-- BLOCK 1,2 --------------------------------------
+	
+	;-- グラフィック領域
+	lea	GVRAM_65536_P0+oText,a0			* 12
+	
+	;-- パターンネームテーブル
+	movea.l	PatNameTbl(a6),a1			* 16
+	lea	32*8(a1),a1				*  8
+	
+	;-- パターンジェネレータテーブル
+	movea.l	PatGenTbl(a6),a2			* 16
+	lea	256*8(a2),a2				*  8
+	
+	;-- カラーテーブル
+	movea.l	ColorTbl(a6),a3				* 16
+	lea	256*8(a3),a3				*  8
+	
+	;-- 変換テーブル
+	lea	table_PCGtoGRAPH,a4			* 12
+	
+	;-- 次のキャラクタアドレス
+	moveq.l	#16,d1					*  4
+	
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept 32
+	
+	;-- PatNameTblから１文字取り出す
+	moveq.l	#0,d0					*  4
+	move.b	(a1)+,d0				*  8
+	
+	;-- PatGenTblのアドレス算出
+	lsl.w	#3,d0					* 12
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス算出
+	lea	(a3,d0.w),a6				* 12
+	
+	;-- line 1
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 62
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+	
+	adda.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	1024*8-32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	lea	256*8(a2),a2				*  8
+	lea	256*8(a3),a3				*  8
+	
+	
+	
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept 32
+	
+	;-- PatNameTblから１文字取り出す
+	moveq.l	#0,d0					*  4
+	move.b	(a1)+,d0				*  8
+	
+	;-- PatGenTblのアドレス算出
+	lsl.w	#3,d0					* 12
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス算出
+	lea	(a3,d0.w),a6				* 12
+	
+	;-- line 1
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 62
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+	
+	adda.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	1024*8-32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	
+	;-- 変更テーブルクリア -----------------------------
+	
+	;-- パターンネーム変更テーブル
+	lea	_PatNameUpdateTbl,a0			* 12
+	SETREL
+	
+	moveq.l	#-1,d0					*  4
+	
+	move.w	#(32*32)/2/4-1,d1			*  4
+@@:
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	dbra	d1,@b					* 
+	
+	;-- ﾊﾟﾀｰﾝｼﾞｪﾈﾚｰﾀ変更テーブル
+	lea	PatGenUpdateTbl(a6),a0			*  8
+	
+	move.w	#256*4/2/4-1,d1				* 
+@@:
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	move.l	d0,(a0)+				* 
+	dbra	d1,@b					* 
+	
+	
+	
+	*-- スプライトパターン設定 -------------------------
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- Sprパターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	*-- パターン書き込み
+.if 0
+	.rept 8
+	move.b	(a2)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a0)+			* 26 = 46 * 8 = 368
+	.endm
+.else
+	.rept 4
+	move.w	(a2)+,d0				*  8
+	move.b	d0,(sp)					*  8
+	clr.b	d0					*  4
+	move.l	16(a1,d0.w),(a0)+			* 26
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a0)+			* 26 = 80 * 4 = 320
+	.endm
+.endif
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	
+	*-- Sprパターンジェネレータテーブル変更テーブルクリア
+	lea	SprPatGenUpdateTbl(a6),a0		*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/4-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- ｽﾌﾟﾗｲﾄｱﾄﾘﾋﾞｭｰﾄﾃｰﾌﾞﾙ設定 ------------------------
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*--
+	.rept	32
+	*--
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a0)+,d0				*  8
+	
+	cmpi.b	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.w	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a0)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a0)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a0)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	move.w	d3,-(sp)				*  8
+	move.b	d4,(sp)					*  8
+	move.w	(sp)+,d3				*  8
+	andi.w	#%0000_1111_1111_1111,d3		*  8
+	
+	
+	*-- スプライトコントロールレジスタ設定
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	move.w	d3,(a1)+				*  8
+	move.w	d6,(a1)+				*  8
+	.endm
+	
+	
+	*-- スプライトアトリビュート変更テーブルクリア
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#32/4-1,d1				*  4
+@@:
+	move.l	d0,(a2)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+;;	move.b	d7,(BGcontrol)				* 16
+	
+	bra	GRA2_procInt				* 10
+	
+	
+	
+	;-------------------------------------------------------------
+	; BLOCK 2,3,4 パターンネームテーブル更新
+GRA2_updateTBlkPatName:
+	
+	
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	GRA2_updateTBlkPatGen_Name		* 
+	
+	
+.ifdef DEBUG_GRA2	;-- Yellow
+	move.w	#%11111_11111_00000_1,(TPALETTE+15*2)	* GR
+.endif
+	
+	
+	;-- グラフィック領域
+	lea	GVRAM_65536_P0+oText+16*31+1024*8*15,a0	* 12
+	
+	;-- パターンネーム変更テーブル
+	lea	_PatNameUpdateTbl+32*8*2+32*16*2,a1	* 12
+	SETREL
+	
+	;-- パターンジェネレータテーブル
+	movea.l	PatGenTbl(a6),a2			* 16
+	lea	256*8*2(a2),a2				*  8
+	
+	;-- カラーテーブル
+	movea.l	ColorTbl(a6),a3				* 16
+	lea	256*8*2(a3),a3				*  8
+	
+	;-- 変換テーブル
+	lea	table_PCGtoGRAPH,a4			* 12
+	
+	;-- 次のキャラクタアドレス
+	moveq.l	#16,d1					*  4
+	
+	;-- テーブルクリア用
+	moveq.l	#-1,d2					*  4
+	
+	;--
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept	32
+	move.w	-(a1),d0				*  8
+	bmi	@f					* 10/ 8 (T/F)
+	
+	move.w	d2,(a1)					*  8
+	
+	;-- PatGenTblのアドレス算出
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス算出
+	lea	(a3,d0.w),a6				* 12
+	
+	;-- line 1
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 66
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+	
+@@:
+	suba.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	-1024*8+32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	lea	-256*8(a2),a2				*  8
+	lea	-256*8(a3),a3				*  8
+	
+	
+	;--
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept	32
+	move.w	-(a1),d0				*  8
+	bmi	@f					* 10/ 8 (T/F)
+	
+	move.w	d2,(a1)					*  8
+	
+	;-- PatGenTblのアドレス算出
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス算出
+	lea	(a3,d0.w),a6				* 12
+	
+	;-- line 1
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 66
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+@@:
+	suba.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	-1024*8+32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	
+	bra	GRA2_procInt				* 10
+	
+	
+	
+	;-------------------------------------------------------------
+	; BLOCK 2,3,4 パターンジェネレータテーブル更新
+GRA2_updateTBlkPatGen:
+	
+.ifdef DEBUG_GRA2
+	move.w	#%11111_00000_11111_1,(TPALETTE+15*2)	* GB
+.endif
+	
+	
+	
+	;-- グラフィック領域
+	lea	GVRAM_65536_P0+oText,a0			* 12
+	
+	;-- パターンジェネレータ変更テーブル
+	lea	PatGenUpdateTbl+256*2(a6),a1		*  8
+	
+	;-- パターンジェネレータテーブル
+	movea.l	PatGenTbl(a6),a2			* 16
+	
+	;-- カラーテーブル
+	move.l	ColorTbl(a6),d3				* 16
+	sub.l	a2,d3					*  8
+	
+	lea	256*8(a2),a2				*  8
+	
+	;-- パターンネームテーブル
+	movea.l	PatNameTbl(a6),a3			* 16
+	lea	32*8(a3),a3				*  8
+	
+	;-- 変換テーブル
+	lea	table_PCGtoGRAPH,a4			* 12
+	
+	;-- 次のキャラクタアドレス
+	moveq.l	#16,d1					*  4
+	
+	;--
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept	32
+	;-- PatNameTblから１バイト取り出し、変更があるか調べる
+	moveq.l	#0,d0					*  4
+	move.b	(a3)+,d0				*  8
+	add.w	d0,d0					*  4
+	move.w	(a1,d0.w),d0				* 14
+	bmi	@f					* 10/ 8 (T/F)
+	
+	;-- PatGenTblのアドレス
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス
+	lea	(a5,d3.l),a6				* 12
+	
+	;-- パターン書き込み
+	;-- line 1
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 62
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+@@:
+	adda.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	1024*8-32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	;-- PatGenUpdateTbl BLOCK 3
+	lea	256*2(a1),a1				*  8
+	
+	;-- PatGenTbl
+	lea	256*8(a2),a2				*  8
+	
+	;--
+	moveq.l	#8-1,d4					*  4
+1:
+	.rept	32
+	;-- PatNameTblから１バイト取り出し、変更があるか調べる
+	moveq.l	#0,d0					*  4
+	move.b	(a3)+,d0				*  8
+	add.w	d0,d0					*  4
+	move.w	(a1,d0.w),d0				* 14
+	bmi	@f					* 10/ 8 (T/F)
+	
+	;-- PatGenTblのアドレス
+	lea	(a2,d0.w),a5				* 12
+	
+	;-- ColorTblのアドレス
+	lea	(a5,d3.l),a6				* 12
+	
+	;-- パターン書き込み
+	;-- line 1
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 62
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+@@:
+	adda.w	d1,a0					*  8
+	
+	.endm
+	
+	lea	1024*8-32*16(a0),a0			*  8
+	dbra	d4,1b					* 
+	
+	
+	*-- テーブルクリア
+	; a1 ... PatGenUpdateTbl
+	
+	lea	-256*2(a1),a2				*  8
+	moveq.l	#-1,d0					*  4
+	move.w	#256*2/4-1,d1				*  8
+@@:
+	move.l	d0,(a1)+				* 12
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	
+	bra	GRA2_procInt				* 10
+	
+	
+	
+	
+	;-- ﾊﾟﾀｰﾝﾈｰﾑ/ﾊﾟﾀｰﾝｼﾞｪﾈﾚｰﾀﾃｰﾌﾞﾙの両方を更新 -------------------
+GRA2_updateTBlkPatGen_Name:
+	
+	
+.ifdef DEBUG_GRA2	;Yellow
+	move.w	#%00000_11111_11111_1,(TPALETTE+15*2)	* RB
+.endif
+	
+	
+	;-- グラフィック領域
+	lea	GVRAM_65536_P0+oText+16*31+1024*8*15,a0	* 12
+	
+	;-- パターンジェネレータ変更テーブル
+	lea	PatGenUpdateTbl+256*2*2(a6),a1		*  8
+	
+	;-- パターンネーム変更テーブル
+	lea	_PatNameUpdateTbl+32*8*2+32*16*2,a2	* 12
+	SETREL
+	
+	;-- パターンネームテーブル
+	movea.l	PatNameTbl(a6),a3			* 16
+	lea	32*8*3-1(a3),a3				*  8
+	
+	;-- 変換テーブル
+	lea	table_PCGtoGRAPH,a4			* 12
+	
+	;-- パターンジェネレータテーブル
+	move.l	PatGenTbl(a6),d3			* 16
+	add.w	#256*8*2,d3				*  8
+	
+	;-- カラーテーブル
+	move.l	ColorTbl(a6),d4				* 16
+	add.w	#256*8*2,d4				*  8
+	
+	;-- 次のキャラクタアドレス
+	moveq.l	#16,d1					*  4
+	
+	;-- テーブルクリア用
+	moveq.l	#-1,d5					*  4
+	
+	moveq.l	#8-1,d2					*  4
+1:
+	.rept 32
+	;-- PatNameTblに変更があれば書き込む
+	move.w	-(a2),d0				*  8		PatNameUpdateTbl
+	bpl.s	2f					* 10/ 8 (T/F)
+	
+	;-- PatGenTblに変更がある ?
+	moveq.l	#0,d0					*  4
+	move.b	(a3),d0					*  8		PatNameTbl
+	add.w	d0,d0					*  4
+	move.w	(a1,d0.w),d0				* 14
+	bmi	3f					* 10/ 8 (T/F)	PatGenUpdateTbl
+2:	;
+	move.w	d5,(a2)					*  8		PatNameUpdateTbl
+	
+	;-- パターンジェネレータ／カラーテーブルのアドレス
+	movea.w	d0,a5					*  4
+	movea.w	d0,a6					*  4
+	
+	adda.l	d3,a5					*  8
+	adda.l	d4,a6					*  8
+	
+	;-- パターン書き込み
+	;-- line 1
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 66
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+3:
+	;-- 次のキャラクタ位置へ
+	suba.w	d1,a0					*  8
+	
+	;-- PatNameTbl +1
+	subq.w	#1,a3					*  8
+	.endm
+	
+	;-- 次の行へ
+	lea	-1024*8+32*16(a0),a0			*  8
+	
+	dbra	d2,1b					* 
+	
+	
+	
+	
+	;-- PatGenUpdateTbl BLOCK 2
+	lea	-256*2(a1),a1				*  8
+	
+	;-- PatGenTbl, ColorTbl
+	sub.w	#256*8,d4				*  8
+	sub.w	#256*8,d3				*  8
+	
+	
+	moveq.l	#8-1,d2					*  4
+1:
+	.rept 32
+	;-- PatNameTblに変更があれば書き込む
+	move.w	-(a2),d0				*  8
+	bpl.s	2f					* 10/ 8 (T/F)
+	
+	;-- PatGenTblに変更がある ?
+	moveq.l	#0,d0					*  4
+	move.b	(a3),d0					*  8
+	add.w	d0,d0					*  4
+	move.w	(a1,d0.w),d0				* 14
+	bmi	3f					* 10/ 8 (T/F)
+2:	;
+	move.w	d5,(a2)					*  8
+	
+	;-- パターンジェネレータ／カラーテーブルのアドレス
+	movea.w	d0,a5					*  4
+	movea.w	d0,a6					*  4
+	
+	adda.l	d3,a5					*  8
+	adda.l	d4,a6					*  8
+	
+	;-- パターン書き込み
+	;-- line 1
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),(a0)				* 26 = 66
+	
+	;-- line 2
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024(a0)			* 30 = 62
+	
+	;-- line 3
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*2(a0)			* 30 = 70
+	
+	;-- line 4
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*3(a0)			* 30 = 62
+	
+	;-- line 5
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*4(a0)			* 30 = 70
+	
+	;-- line 6
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*5(a0)			* 30 = 62
+	
+	;-- line 7
+	moveq.l	#0,d0					*  4
+	move.w	(a5)+,d0				*  8
+	move.b	d0,-(sp)				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*6(a0)			* 30 = 70
+	
+	;-- line 8
+	moveq.l	#0,d0					*  4
+	move.w	(sp)+,d0				*  8
+	move.b	(a6)+,d0				*  8
+	lsl.l	#2,d0					* 12
+	move.l	(a4,d0.l),1024*7(a0)			* 30 = 62
+3:
+	;-- 次のキャラクタ位置へ
+	suba.w	d1,a0					*  8
+	
+	;-- PatNameTbl +1
+	subq.w	#1,a3					*  8
+	.endm
+	
+	;-- 次の行へ
+	lea	-1024*8+32*16(a0),a0			*  8
+	
+	dbra	d2,1b					* 
+	
+	
+	
+	
+	
+	*-- PatGenUpdateTbl クリア
+	;-- パターンジェネレータ変更テーブル
+	lea	PatGenUpdateTbl+256*2(a6),a1		*  8
+	
+	moveq.l	#-1,d0					*  4
+	move.w	#256*2/4-1,d1				*  8
+@@:
+	move.l	d0,(a1)+				* 12
+	move.l	d0,(a1)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	
+	
+	jbra	GRA2_procInt				* 10
+	
+	
+	
+	
+	
+	
+	*-- スプライトパターンジェネレータテーブルアップデート -------
+GRA2_SprPatGenUpdate:
+	
+.ifdef DEBUG_GRA2
+	move.w	#%00000_11111_00000_1,(TPALETTE+15*2)	* R
+.endif
+	
+	
+	
+	*-- スプライト/BG 非表示
+;;	move.b	(BGcontrol),d2				* 16
+;;	clr.b	(BGcontrol)				* 20
+	
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- パターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	SprPatGenUpdateTbl(a6),a3		*  8
+	
+	*-- d1.w : テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	move.w	(a3)+,d0				*  8
+	bmi	1f					* 
+	
+	move.w	d1,-2(a3)				* 12
+	
+	*-- PatGenTblのアドレス
+	lea	(a2,d0.w),a4				* 12
+	
+	*-- SprPCGエリアのアドレス
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	(a0,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+.if 0
+	.rept 8
+	move.b	(a4)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a5)+			* 26 = 46*8 = 368
+	.endm
+.else
+	.rept 4
+	move.w	(a4)+,d0				* 12
+	move.b	d0,(sp)					*  8
+	clr.b	d0					*  4
+	move.l	16(a1,d0.w),(a5)+			* 26
+	
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a5)+			* 26 = 84*4 = 336
+	.endm
+.endif
+1:
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	*-- スプライト/BG 表示を元に戻す
+;;	move.b	d2,(BGcontrol)				* 16
+	
+	
+	jbra	GRA2_checkSprAtr			* 10
+	
+	
+	
+	*-- スプライトアトリビュートテーブルアップデート -------
+GRA2_SprAtrUpdate:
+	
+	
+.ifdef DEBUG_GRA2
+	move.w	#%00000_00000_11111_1,(TPALETTE+15*2)	* B
+.endif
+	
+	
+	*-- スプライト/BG 非表示
+;;	move.b	(BGcontrol),d2				* 16
+;;	clr.b	(BGcontrol)				* 20
+	
+	
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトアトリビュート変更テーブル
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*-- テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	
+	moveq.l	#0,d2	!!!				*  4
+	
+	*--
+	.rept	32
+;;	move.w	(a2)+,d0				*  8
+;;	bmi.s	1f					* 10/ 8 (T/F)
+	
+	* テーブルクリア
+;;	move.w	d1,-2(a2)				* 12
+	
+	* SprAtrTbl
+;;;	lea	(a0,d0.w),a3				* 12
+	lea	(a0,d2.w),a3				* 12
+	
+	addq.w	#4,d2					* 
+	
+	*
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a3)+,d0				*  8
+	
+	cmpi.w	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.w	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a3)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a3)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a3)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	move.w	d3,-(sp)				*  8
+	move.b	d4,(sp)					*  8
+	move.w	(sp)+,d3				*  8
+	andi.w	#%0000_1111_1111_1111,d3		*  8
+	
+	
+	*-- スプライトコントロールレジスタ設定
+	;X,Y
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	;Color, SPAT#
+	move.w	d3,(a1)+				*  8
+	;PRW
+	move.w	d6,(a1)+				*  8
+	
+	bra	2f					* 10
+1:
+	addq.w	#8,a1					*  8
+2:
+	.endm
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+;;	move.b	d2,(BGcontrol)				* 16
+	
+	
+	jbra	GRA2_checkPat				* 10
+
+
+
+;----------------------------------------------------------------------------------------------
+GRA2_BL1_RASTER_interrupt:
+	;-- Disp ON, BG0 ON
+	move.w	#%0000_0010_0000_0001,(BGcontrol)
+	
+	
+.ifdef DEBUG_GRA2
+	move.w	#%10000_10000_10000_1,(TPALETTE+15*2)	* R
+.endif
+	
+	;-- 割り込みラスタ設定
+.ifndef GRA2_LOWRESO
+	move.w	#$13+(24+64)*2+1,(CRTC_R09)
+.else
+	move.w	#$11+(24+64)+1,(CRTC_R09)
+.endif
+	move.l	#GRA2_BL2_RASTER_interrupt,(VECTOR_RASTER*4)
+	
+	rte
+
+
+GRA2_BL2_RASTER_interrupt:
+	;-- Disp ON, BG0 OFF
+	move.w	#%0000_0010_0000_0000,(BGcontrol)
+	
+	;-- TEXT Palette 0 をクリア
+	move.w	#0,(TPALETTE)
+	
+.ifdef DEBUG_GRA2
+	move.w	#%11111_11111_11111_1,(TPALETTE+15*2)	* R
+.endif
+	
+	;-- 割り込みラスタ設定
+.ifndef GRA2_LOWRESO
+	move.w	#$13+(24+64*3)*2+1,(CRTC_R09)
+.else
+	move.w	#$11+(24+64*3)+1,(CRTC_R09)
+.endif
+	move.l	#GRA2_BL4_RASTER_interrupt,(VECTOR_RASTER*4)
+	
+	rte
+
+
+GRA2_BL4_RASTER_interrupt:
+	;-- Disp OFF, BG0 OFF
+	move.w	#%0000_0000_0000_0000,(BGcontrol)
+;;	move.w	#%0000_0010_0000_0001,(BGcontrol)
+	
+.ifdef DEBUG_GRA2
+	move.w	#%00000_00000_00000_0,(TPALETTE+15*2)	* R
+.endif
+	
+	;-- 割り込みラスタ設定
+	;   (ｽﾌﾟﾗｲﾄｽｸﾛｰﾙﾚｼﾞｽﾀへの設定は２ﾗｽﾀ前に行わなければいけない)
+	;   (BGはOK)
+.ifndef GRA2_LOWRESO
+	move.w	#$13+(24+0)*2+1-2,(CRTC_R09)
+.else
+	move.w	#$11+(24+0)+1-2,(CRTC_R09)
+.endif
+	move.l	#GRA2_BL1_RASTER_interrupt,(VECTOR_RASTER*4)
+	
+	
+	jmp	GRA2_VDISP_interrupt_r
+	
+	rte
+

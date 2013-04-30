@@ -1,0 +1,2566 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+	.include x68k.equ
+	.include ../Z80/z80emu.equ
+	.if MPU.eq.68000
+		.include ../work/000/flagtbl.equ
+	.else
+		.fail 1
+	.endif
+	
+	.xdef TXT1_VDISP_interrupt
+	.xdef TXT2_VDISP_interrupt
+***	.xdef MLT_VDISP_interrupt
+	.xdef GRA1_VDISP_interrupt
+	.xdef GRA2_VDISP_interrupt
+***	.xdef GRA3_VDISP_interrupt
+	.xdef GRA4_VDISP_interrupt
+	.xdef GRA5_VDISP_interrupt
+	.xdef GRA6_VDISP_interrupt
+	.xdef GRA7_VDISP_interrupt
+	.xdef tableSCRrel
+	
+	.xref FtblinIO
+	.xref PCGdatatbl,table_PCGtoGRAPH,table_PCGtoXPCG
+	.xref _PatNameUpdateTbl
+
+RELADNUM = 0
+
+SETREL	.macro
+	RELADR_%RELADNUM: .equ *-4
+	RELADNUM: = RELADNUM+1
+.endm
+
+
+
+	.text
+
+
+
+*----------------------------------------------------------------------------------------------
+*-- Z80割り込み処理
+Z80INTERRUPT	.macro
+	.local	suspend,skip
+	
+	;-- 割り込みの間引き
+	subq.w	#1,cnt_CountVDISP(a6)			* 16
+	bne.s	skip					* 10/ 8 (T/F)
+	move.w	CountVDISP(a6),cnt_CountVDISP(a6)	* 20
+	
+	;-- VDP 割り込み禁止 ?
+	btst.b	#5,VDPreg_1(a6)				* 16	IE0
+	beq.s	skip					* 10/ 8 (T/F)
+	
+	;-- VDP 割り込み発生
+	tas.b	StatusReg_0(a6)				* 18
+	
+	;-- Z80 割り込み Enable/Disable ?
+	tst.b	Z80_DIEI+4(a6)				* 12
+	beq.s	suspend					* 10/ 8 (T/F)
+	
+	;-- Z80 割り込み発生
+	move.b	Z80INTREQ+4(a6),Z80intrFlag+4(a6)	* 20
+	
+	;-- Z80 デバッガ用の割り込みフラグ
+	move.b	#0,interrupt_inDebugger+4(a6)		* 16
+	
+;;;	;-- 割り込み禁止状態に (DI)
+;;;	move.b	#0,Z80_DIEI+4(a6)			* 16
+	
+	bra	skip					* 10
+	
+	;-- Z80 割り込み保留
+suspend:
+	move.b	#Z80_SUSPEND_INTR,Z80intrSuspend+4(a6)	* 16
+skip:
+.endm
+
+
+;----------------------------------------------------------------------------------------------
+KEYBOARD_LED	.macro
+	.local	skip,skipNorm
+	
+	;-- デバッグモードの場合、[コード入力]を点滅
+	tst.b	noKeyInt(a6)				; 12
+	beq.s	skipNorm				; 10/ 8 (T/F)
+	
+	addq.w	#1,(debugModeCounter)
+	move.w	(debugModeCounter),d0
+	andi.w	#%0000_0100,d0
+	eor.b	d0,keyboard_LED(a6)
+skipNorm:
+	
+	
+	move.b	keyboard_LED(a6),d0
+	cmp.b	now_keyboard_LED(a6),d0
+	beq.s	skip
+	
+	tst.b	(MFP_TSR)
+	bpl.s	skip
+	
+	move.b	d0,(MFP_UDR)
+	move.b	d0,now_keyboard_LED(a6)
+skip:
+.endm
+
+
+;----------------------------------------------------------------------------------------------
+SAVE_STACK	.macro
+	move.l	sp,(Save_sp)
+**	lea	scrupd_stack(pc),sp
+	lea	scrupd_stack,sp
+.endm
+
+RESTORE_STACK	.macro
+	movea.l	(Save_sp),sp
+.endm
+
+
+;----------------------------------------------------------------------------------------------
+;-- TEXT 1 垂直帰線割り込み処理
+TXT1_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	;-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	TXT1_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	TXT1_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	;-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	TXT1_ScrRefresh				* 10/ 8 (T/F)
+	
+	;-- PatNameTbl アップデート ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	TXT1_Pat_Gen_Name_TblUpdate		* 
+	
+	;-- PatGenTbl アップデート ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	TXT1_PatGenTblUpdate			* 
+	
+	
+TXT1_intr_1:
+TXT1_procInt:
+	;-- Z80 割り込み処理
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	;--
+	RESTORE_STACK					* 
+	
+TXT1_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	
+	;-- 画面再表示 -------------------------------------
+TXT1_ScrRefresh:
+	;-- アップデートフラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatNameTblUpdate(a6)			* 12
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	
+	;-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	;-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	;-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a2			* 16
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTbl から１文字取り出し
+	moveq.l	#0,d0					*  4
+	move.b	(a2)+,d0				*  8
+	
+	*-- PatGenTbl のアドレス
+	lsl.w	#3,d0					* 12
+	lea	(a1,d0.w),a3				* 12
+	
+	*-- パターン書き込み
+	move.b	(a3)+,(a0)+				*  8
+	move.b	(a3)+,$80-1(a0)				* 16
+	move.b	(a3)+,$100-1(a0)			* 16
+	move.b	(a3)+,$180-1(a0)			* 16
+	move.b	(a3)+,$200-1(a0)			* 16
+	move.b	(a3)+,$280-1(a0)			* 16
+	move.b	(a3)+,$300-1(a0)			* 16
+	move.b	(a3)+,$380-1(a0)			* 16
+	.endm
+	
+	lea	128*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatNameUpdateTbl, PatGenUpdateTbl クリア
+	lea	_PatNameUpdateTbl,a0			* 12
+	SETREL
+	lea	PatGenUpdateTbl(a6),a1			*  8
+	
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/2-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 12
+	move.l	d0,(a1)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	move.w	#(40*24-256)/2-1,d1			*  8
+@@:
+	move.l	d0,(a0)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_intr_1				* 10
+	
+	
+	*-- PatNameTbl, PatGenTblの両方に更新がある場合 ----
+TXT1_Pat_Gen_Name_TblUpdate:
+	
+	*-- PatGenTbl にアップデートが必要ない ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bmi	TXT1_PatNameTblUpdate			* 
+	
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a4			* 12
+	SETREL
+	
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTblに変更があれば書き込む
+	move.w	(a4),d0					*  8
+	bpl.s	2f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblに変更がある ?
+	moveq.l	#0,d0					*  4
+	move.b	(a3),d0					*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	3f					* 10/ 8 (T/F)
+2:	*
+	move.w	#-1,(a4)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	move.b	(a5)+,(a0)				* 12
+	move.b	(a5)+,$80(a0)				* 16
+	move.b	(a5)+,$100(a0)				* 16
+	move.b	(a5)+,$180(a0)				* 16
+	move.b	(a5)+,$200(a0)				* 16
+	move.b	(a5)+,$280(a0)				* 16
+	move.b	(a5)+,$300(a0)				* 16
+	move.b	(a5)+,$380(a0)				* 16
+3:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- PatNameTbl +1
+	addq.w	#1,a3					*  8
+	
+	*-- PatNameUpdateTbl +1
+	addq.w	#2,a4					*  8
+	.endm
+	
+	lea	128*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatGenUpdateTbl クリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_intr_1				* 10
+	
+	
+	*-- PatNameTbl のみに更新がある場合 ----------------
+TXT1_PatNameTblUpdate:
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a2			* 12
+	SETREL
+	
+	*-- 
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	move.w	(a2),d0					*  8
+	bmi.s	@f					* 10/ 8 (T/F)
+	*
+	*-- 変更テーブルのフラグを落とす
+	move.w	#-1,(a2)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- 変更テーブルのアドレス +1
+	addq.w	#2,a2					*  8
+	.endm
+	
+	lea	128*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_intr_1				* 10
+	
+	
+	*-- PatGenTblのみに更新がある場合 ------------------
+TXT1_PatGenTblUpdate:
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTblから１バイト取り出し、変更があるか調べる
+	moveq.l	#0,d0					*  4
+	move.b	(a3)+,d0				*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	@f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	.endm
+	
+	lea	128*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- テーブルクリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_intr_1				* 10
+
+
+
+*----------------------------------------------------------------------------------------------
+*-- TEXT 1 垂直帰線割り込み処理
+TXT1_r_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	TXT1_r_skipUpdate			* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	TXT1_r_ScrRefresh				* 10/ 8 (T/F)
+	
+	*-- PatNameTbl アップデート ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	TXT1_r_Pat_Gen_Name_TblUpdate		* 
+	
+	*-- PatGenTbl アップデート ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	TXT1_r_PatGenTblUpdate			* 
+	
+	
+TXT1_r_intr_1:
+	*-- Z80 割り込み処理
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	RESTORE_STACK					* 
+TXT1_r_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	*	+-----------------+-----------------+-----------------+---
+	*	|00000011 11112222|22333333 44444455|55556666 66777777|   
+	*	|                 |                 |                 |   
+	*	|00000000         |                 |                 |   
+	*	|      11 111111  |                 |                 |   
+	*	|             2222|2222             |                 |   
+	*	|                 |  333333 33      |                 |   
+	*	|                 |         44444444|                 |   
+	*	|                 |               55|555555           |   
+	*	|                 |                 |    6666 6666    |   
+	*	|                 |                 |           777777|77 
+	*	+-----------------+-----------------+-----------------+---
+	*	
+	*	0	%1111_1100_0000_0000	%0000_0000_1111_1100
+	*	1	%0000_0011_1111_0000	%1111_0000_0000_0011
+	*	2	%1100_0000_0000_1111	%0000_1111_1100_0000
+	*	3	%0011_1111_0000_0000	%0000_0000_0011_1111
+	*	4	%0000_0000_1111_1100	%1111_1100_0000_0000
+	*	5	%1111_0000_0000_0011	%0000_0011_1111_0000
+	
+	
+	
+	*-- 画面再表示 -------------------------------------
+TXT1_r_ScrRefresh:
+	*-- アップデートフラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatNameTblUpdate(a6)			* 12
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a2			* 16
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTbl から１文字取り出し
+	moveq.l	#0,d0					*  4
+	move.b	(a2)+,d0				*  8
+	
+	*-- PatGenTbl のアドレス
+	lsl.w	#3,d0					* 12
+	lea	(a1,d0.w),a3				* 12
+	
+	*-- パターン書き込み
+	move.b	(a3)+,d0				*  8
+	move.b	(a3)+,$80(a0)				* 16
+	move.b	(a3)+,$100(a0)				* 16
+	move.b	(a3)+,$180(a0)				* 16
+	move.b	(a3)+,$200(a0)				* 16
+	move.b	(a3)+,$280(a0)				* 16
+	move.b	(a3)+,$300(a0)				* 16
+	move.b	(a3)+,$380(a0)				* 16
+	move.b	d0,(a0)+				*  8
+	.endm
+	
+	lea	$80*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatNameUpdateTbl, PatGenUpdateTbl クリア
+	lea	_PatNameUpdateTbl,a0			* 12
+	SETREL
+	lea	PatGenUpdateTbl(a6),a1			*  8
+	
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/2-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 12
+	move.l	d0,(a1)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	move.w	#(40*24-256)/2-1,d1			*  8
+@@:
+	move.l	d0,(a0)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_r_intr_1				* 10
+	
+	
+	*-- PatNameTbl, PatGenTblの両方に更新がある場合 ----
+TXT1_r_Pat_Gen_Name_TblUpdate:
+	
+	*-- PatGenTbl にアップデートが必要ない ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bmi	TXT1_r_PatNameTblUpdate			* 
+	
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a4			* 12
+	SETREL
+	
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTblに変更があれば書き込む
+	move.w	(a4),d0					*  8
+	bpl.s	2f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblに変更がある ?
+	moveq.l	#0,d0					*  4
+	move.b	(a3),d0					*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	3f					* 10/ 8 (T/F)
+2:	*
+	move.w	#-1,(a4)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	move.b	(a5)+,(a0)				* 12
+	move.b	(a5)+,$80(a0)				* 16
+	move.b	(a5)+,$100(a0)				* 16
+	move.b	(a5)+,$180(a0)				* 16
+	move.b	(a5)+,$200(a0)				* 16
+	move.b	(a5)+,$280(a0)				* 16
+	move.b	(a5)+,$300(a0)				* 16
+	move.b	(a5)+,$380(a0)				* 16
+3:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- PatNameTbl +1
+	addq.w	#1,a3					*  8
+	
+	*-- PatNameUpdateTbl +1
+	addq.w	#2,a4					*  8
+	.endm
+	
+	lea	$80*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatGenUpdateTbl クリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_r_intr_1				* 10
+	
+	
+	*-- PatNameTbl のみに更新がある場合 ----------------
+TXT1_r_PatNameTblUpdate:
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a2			* 12
+	SETREL
+	
+	*-- 
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	move.w	(a2),d0					*  8
+	bmi.s	@f					* 10/ 8 (T/F)
+	*
+	*-- 変更テーブルのフラグを落とす
+	move.w	#-1,(a2)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- 変更テーブルのアドレス +1
+	addq.w	#2,a2					*  8
+	.endm
+	
+	lea	$80*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_r_intr_1				* 10
+	
+	
+	*-- PatGenTblのみに更新がある場合 ------------------
+TXT1_r_PatGenTblUpdate:
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM+(384-320)/2/8+(240-212)/2*128,a0	* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	moveq.l	#24-1,d1				*  4
+1:
+	.rept	40
+	*-- PatNameTblから１バイト取り出し、変更があるか調べる
+	moveq.l	#0,d0					*  4
+	move.b	(a3)+,d0				*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	@f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	.endm
+	
+	lea	$80*8-40(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- テーブルクリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT1_r_intr_1				* 10
+
+
+
+
+*-- TEXT 2 垂直帰線割り込み処理
+TXT2_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	TXT2_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	TXT2_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	TXT2_ScrRefresh				* 10/ 8 (T/F)
+	
+	*-- PatNameTbl アップデート ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	TXT2_Pat_Gen_Name_TblUpdate		* 
+	
+	*-- PatGenTbl アップデート ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	TXT2_PatGenTblUpdate			* 
+	
+	
+TXT2_intr_1:
+TXT2_procInt:
+	*-- Z80 割り込み処理
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	RESTORE_STACK					* 
+TXT2_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	
+	*-- 画面再表示 -------------------------------------
+TXT2_ScrRefresh:
+	
+	*-- アップデートフラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatNameTblUpdate(a6)			* 12
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM,a0				* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a2			* 16
+	
+	moveq.l	#27-1,d1				*  4
+1:
+	moveq.l	#2-1,d3					*  4
+2:
+	.rept	40
+	*-- PatNameTbl から１文字取り出し
+	moveq.l	#0,d0					*  4
+	move.b	(a2)+,d0				*  8
+	
+	*-- PatGenTbl のアドレス
+	lsl.w	#3,d0					* 12
+	lea	(a1,d0.w),a3				* 12
+	
+	*-- パターン書き込み
+	move.b	(a3)+,(a0)+				*  8
+	move.b	(a3)+,$80-1(a0)				* 16
+	move.b	(a3)+,$100-1(a0)			* 16
+	move.b	(a3)+,$180-1(a0)			* 16
+	move.b	(a3)+,$200-1(a0)			* 16
+	move.b	(a3)+,$280-1(a0)			* 16
+	move.b	(a3)+,$300-1(a0)			* 16
+	move.b	(a3)+,$380-1(a0)			* 16
+	.endm
+	
+	dbra	d3,2b					* 10/14 (T/F)
+	
+	lea	128*8-80(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatNameUpdateTbl, PatGenUpdateTbl クリア
+	lea	_PatNameUpdateTbl,a0			* 12
+	SETREL
+	lea	PatGenUpdateTbl(a6),a1			*  8
+	
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/2-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 12
+	move.l	d0,(a1)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	move.w	#(80*27-256)/2-1,d1			*  8
+@@:
+	move.l	d0,(a0)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT2_intr_1				* 10
+	
+	
+	*-- PatNameTbl, PatGenTblの両方に更新がある場合 ----
+TXT2_Pat_Gen_Name_TblUpdate:
+	
+	*-- PatGenTbl にアップデートが必要ない ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bmi	TXT2_PatNameTblUpdate			* 
+	
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM,a0				* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a4			* 12
+	SETREL
+	
+	
+	moveq.l	#27-1,d1				*  4
+1:
+	moveq.l	#2-1,d3					*  4
+4:
+	.rept	40
+	*-- PatNameTblに変更があれば書き込む
+	move.w	(a4),d0					*  8
+	bpl.s	2f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblに変更がある ?
+	moveq.l	#0,d0					*  4
+	move.b	(a3),d0					*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	3f					* 10/ 8 (T/F)
+2:	*
+	move.w	#-1,(a4)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	move.b	(a5)+,(a0)				* 12
+	move.b	(a5)+,$80(a0)				* 16
+	move.b	(a5)+,$100(a0)				* 16
+	move.b	(a5)+,$180(a0)				* 16
+	move.b	(a5)+,$200(a0)				* 16
+	move.b	(a5)+,$280(a0)				* 16
+	move.b	(a5)+,$300(a0)				* 16
+	move.b	(a5)+,$380(a0)				* 16
+3:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- PatNameTbl +1
+	addq.w	#1,a3					*  8
+	
+	*-- PatNameUpdateTbl +1
+	addq.w	#2,a4					*  8
+	.endm
+	
+	dbra	d3,4b					* 10/14 (T/F)
+	
+	lea	128*8-80(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- PatGenUpdateTbl クリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT2_intr_1				* 10
+	
+	
+	*-- PatNameTbl のみに更新がある場合 ----------------
+TXT2_PatNameTblUpdate:
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM,a0				* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンネームテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a2			* 12
+	SETREL
+	
+	*-- 
+	moveq.l	#27-1,d1				*  4
+1:
+	moveq.l	#2-1,d3					*  4
+2:
+	.rept	40
+	move.w	(a2),d0					*  8
+	bmi.s	@f					* 10/ 8 (T/F)
+	*
+	*-- 変更テーブルのフラグを落とす
+	move.w	#-1,(a2)				* 12
+	
+	*-- パターンジェネレータテーブルのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	
+	*-- 変更テーブルのアドレス +1
+	addq.w	#2,a2					*  8
+	.endm
+	
+	dbra	d3,2b					* 10/14 (T/F)
+	
+	lea	128*8-80(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT2_intr_1				* 10
+	
+	
+	*-- PatGenTblのみに更新がある場合 ------------------
+TXT2_PatGenTblUpdate:
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- T-VRAM同時アクセス設定
+	move.w	#%0000_0001_1111_0000,(CRTC_R21)	* 
+	
+	*-- T-VRAM の先頭アドレス
+	lea	TVRAM,a0				* 12
+	
+	*-- パターンジェネレータテーブルの先頭アドレス
+	movea.l	PatGenTbl(a6),a1			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a2			*  8
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a3			* 16
+	
+	moveq.l	#27-1,d1				*  4
+1:
+	moveq.l	#2-1,d3					*  4
+2:
+	.rept	40
+	*-- PatNameTblから１バイト取り出し、変更があるか調べる
+	moveq.l	#0,d0					*  4
+	move.b	(a3)+,d0				*  8
+	add.w	d0,d0					*  4
+	move.w	(a2,d0.w),d0				* 14
+	bmi.s	@f					* 10/ 8 (T/F)
+	
+	*-- PatGenTblのアドレス
+	lea	(a1,d0.w),a4				* 12
+	
+	*-- パターン書き込み
+	move.b	(a4)+,(a0)				* 12
+	move.b	(a4)+,$80(a0)				* 16
+	move.b	(a4)+,$100(a0)				* 16
+	move.b	(a4)+,$180(a0)				* 16
+	move.b	(a4)+,$200(a0)				* 16
+	move.b	(a4)+,$280(a0)				* 16
+	move.b	(a4)+,$300(a0)				* 16
+	move.b	(a4)+,$380(a0)				* 16
+@@:
+	*-- T-VRAM +1
+	addq.w	#1,a0					*  8
+	.endm
+	
+	dbra	d3,2b					* 10/14 (T/F)
+	
+	lea	128*8-80(a0),a0				*  8
+	dbra	d1,1b					* 10/14 (分岐あり/なし)
+	
+	*-- テーブルクリア
+	moveq.l	#-1,d0					*  4
+	move.w	#256/2-1,d1				*  8
+@@:
+	move.l	d0,(a2)+				* 12
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	TXT2_intr_1				* 10
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 1 垂直帰線割り込み処理
+*
+*	ScreenRefresh	... 画面再表示
+*	PatGenTblUpdate	... PCG設定
+
+GRA1_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA1_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA1_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA1_intr_2				* 10/ 8 (T/F)
+	
+	*-- PatGenTbl 変更あり ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	GRA1_intr_3				* 
+	
+	*-- PatNameTbl 変更あり ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	GRA1_intr_4				* 
+	
+GRA1_intr_10:
+	*-- ColorTbl 変更あり ?
+	tas	ColorTblUpdate(a6)			* 18
+	bpl	GRA1_intr_9				* 
+	
+GRA1_intr_11:
+	*-- SprPatGenTbl 変更あり ?
+	tas	SprPatGenTblUpdate(a6)			* 18
+	bpl	GRA1_intr_6				* 
+	
+GRA1_intr_7:
+	*-- SprAtrTbl 変更あり ?
+	tas	SprAtrTblUpdate(a6)			* 18
+	bpl	GRA1_intr_8				*
+	
+	
+GRA1_intr_1:
+GRA1_procInt:
+	*-- Z80 割り込み処理 -------------------------------
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	RESTORE_STACK					* 
+GRA1_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	*-- ScreenRefresh ----------------------------------
+GRA1_intr_2:
+	*-- フラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatNameTblUpdate(a6)			* 12
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	move.w	d0,ColorTblUpdate(a6)			* 12
+	move.w	d0,SprPatGenTblUpdate(a6)		* 12
+	move.w	d0,SprAtrTblUpdate(a6)			* 12
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- PCG 設定 ---------------------------------------
+	*-- PCGエリア
+	lea	PCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- パターンジェネレータテーブル
+	movea.l	PatGenTbl(a6),a2			* 16
+	
+	*-- d1.b : カラー指定用
+	moveq.l	#%0010_0000,d1				*  4
+	move.w	#0,-(sp)				* 12
+	
+	*-- d3.w : ループカウンタ
+	moveq.l	#256/8-1,d3				*  4
+@@:
+	.rept 8*8
+	move.b	(a2)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	4(a1,d0.w),d4				* 18
+	or.l	16(a1,d0.w),d4				* 18
+	move.l	d4,(a0)+				* 12
+	.endm
+	
+	add.w	d1,(sp)					* 12
+	
+	dbra	d3,@b					* 10/14 (T/F)
+	
+	addq.w	#2,sp					*  8
+	
+	
+	*-- BGデータエリア設定 -----------------------------
+	*-- BGデータエリアの先頭アドレス
+	lea	BGDATAarea,a0				* 12
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a1			* 16
+	
+	*-- カラーパレット指定用
+	moveq.l	#0,d0					*  4
+	
+	*-- d3.w : ループカウンタ
+	moveq.l	#24-1,d3				*  4
+@@:
+	.rept 32
+	move.b	(a1)+,d0				*  8
+	move.w	d0,d1					*  4
+	add.w	d1,d1					*  4
+	add.w	d1,d1					*  4
+	move.b	d0,d1					*  4
+	move.w	d1,(a0)+				*  8
+	.endm
+	
+	lea	32*2(a0),a0				*  8
+	dbra	d3,@b					* 10/14 (T/F)
+	
+	
+	*-- 変更テーブルクリア
+	* パターンジェネレータテーブル変更テーブル
+	lea	_PatNameUpdateTbl,a0			* 12
+	SETREL
+	lea	PatGenUpdateTbl(a6),a1			*  8
+	
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/2-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 12
+	move.l	d0,(a1)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	move.w	#(32*24-256)/2-1,d1			*  8
+@@:
+	move.l	d0,(a0)+				* 12
+	dbra	d1,@b					* 10/ 8 (T/F)
+	
+	
+	*-- カラーテーブル
+	lea	TPALETTE,a0				* 
+	lea	paletteTbl(a6),a1			*  8
+	
+	movea.l	ColorTbl(a6),a2				* 16
+	
+	
+	moveq.l	#256/8-1,d3				*  4
+@@:
+	move.b	(a2)+,d0				* 
+	
+	;-- パターンの０の部分の色コード
+	moveq.l	#%0000_1111,d1				*  4
+	and.w	d0,d1					*  4
+	add.w	d1,d1					*  4
+	move.w	(a1,d1.w),(a0)+				* 
+	
+	*-- パターンの１の部分の色コード
+	andi.w	#%0000_0000_1111_0000,d0		*  8
+	lsr.w	#3,d0					* 12
+	move.w	(a1,d0.w),(a0)+				* 
+	
+	dbra	d3,@b					* 
+	
+	
+	
+	*-- スプライトパターン設定 -------------------------
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- Sprパターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	*-- パターン書き込み
+	.rept 8
+	move.b	(a2)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a0)+			* 
+	.endm
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	
+	*-- Sprパターンジェネレータテーブル変更テーブルクリア
+	lea	SprPatGenUpdateTbl(a6),a0		*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/4-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- ｽﾌﾟﾗｲﾄｱﾄﾘﾋﾞｭｰﾄﾃｰﾌﾞﾙ設定 ------------------------
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*--
+	.rept	32
+	*--
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a0)+,d0				*  8
+	ext.w	d0					*  4
+	
+	cmpi.b	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.b	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a0)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a0)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a0)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	
+	*-- スプライトコントロールレジスタ設定
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	move.w	d3,(a1)+				*  8
+	move.w	d6,(a1)+				*  8
+	.endm
+	
+	
+	*-- スプライトアトリビュート変更テーブルクリア
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#32/4-1,d1				*  4
+@@:
+	move.l	d0,(a2)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA1_intr_1				* 10
+	
+	
+	
+	
+	*-- パターンジェネレータテーブルアップデート -------
+GRA1_intr_3:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- PCGエリア
+	lea	PCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- パターンジェネレータテーブル
+	movea.l	PatGenTbl(a6),a2			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	PatGenUpdateTbl(a6),a3			*  8
+	
+	*-- d1.w : テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*-- d3.b : カラー設定用
+	moveq.l	#0,d3					*  4
+	
+	*-- d6.b : カラー設定用 (マスク値)
+	moveq.l	#%0010_0000,d6				*  4
+	
+	;--
+	subq.w	#2,sp					*  8
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	*--
+	move.w	(a3)+,d0				*  8
+	bmi	1f					* 
+	
+	move.w	d1,-2(a3)				* 12
+	
+	*-- PatGenTblのアドレス
+	lea	(a2,d0.w),a4				* 12
+	
+	;-- PCG adr
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	(a0,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	move.w	d3,(sp)					*  8
+	.rept 4
+	move.w	(a4)+,d0				*  8
+	move.b	d0,(sp)					*  8
+	move.b	d3,d0					*  4
+	move.l	4(a1,d0.w),d5				* 18
+	or.l	16(a1,d0.w),d5				* 20
+	move.l	d5,(a5)+				* 12
+	
+	move.w	(sp),d0					*  8
+	move.l	4(a1,d0.w),d5				* 18
+	or.l	16(a1,d0.w),d5				* 20
+	move.l	d5,(a5)+				* 12 = 128 * 2 = 256
+	.endm
+	
+1:
+	.endm
+	
+	add.b	d6,d3					*  4
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	addq.w	#2,sp					*  8
+	
+	*-- PatNameTbl 変更あり ?
+	tas	PatNameTblUpdate(a6)			* 18
+	bpl	GRA1_intr_5				* 
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA1_intr_10				* 10
+	
+	
+	
+	*-- パターンネームテーブルアップデート -------------
+GRA1_intr_4:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+GRA1_intr_5:
+	*-- BGデータエリアの先頭アドレス
+	lea	BGDATAarea,a0				* 12
+	
+	*-- パターンネームテーブル変更テーブルの先頭アドレス
+	lea	_PatNameUpdateTbl,a1			* 12
+	SETREL
+	
+	*-- d1.w : テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*-- d3.w : ループカウンタ
+	moveq.l	#24-1,d3				*  4
+@@:
+	.rept 32
+	move.w	(a1)+,d0				*  8
+	bmi.s	1f					* 10/ 8 (T/F)
+	
+	move.w	d1,-2(a1)				* 12
+	
+	move.w	d0,d4					*  4
+	add.w	d4,d4					*  4
+	add.w	d4,d4					*  4
+	move.b	d0,d4					*  4
+	move.w	d4,(a0)					*  8
+1:
+	addq.w	#2,a0					*  8
+	.endm
+	
+	lea	32*2(a0),a0				*  8
+	dbra	d3,@b					* 10/14 (T/F)
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA1_intr_10				* 10
+	
+	
+	
+	
+	*-- カラーテーブルアップデート ------------------------------
+GRA1_intr_9:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- カラーテーブル
+	lea	TPALETTE,a0				* 
+	lea	paletteTbl(a6),a1			*  8
+	
+	movea.l	ColorTbl(a6),a2				* 16
+	
+	
+	moveq.l	#256/8-1,d3				*  4
+@@:
+	move.b	(a2)+,d0				* 
+	
+	;-- パターンの０の部分の色コード
+	moveq.l	#%0000_1111,d1				*  4
+	and.w	d0,d1					*  4
+	add.w	d1,d1					*  4
+	move.w	(a1,d1.w),(a0)+				* 
+	
+	*-- パターンの１の部分の色コード
+	andi.w	#%0000_0000_1111_0000,d0		*  8
+	lsr.w	#3,d0					* 12
+	move.w	(a1,d0.w),(a0)+				* 
+	
+	dbra	d3,@b					* 
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	GRA1_intr_11				* 
+	
+	
+	
+	
+	*-- スプライトパターンジェネレータテーブルアップデート -------
+GRA1_intr_6:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- パターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	SprPatGenUpdateTbl(a6),a3		*  8
+	
+	*-- d1.w : テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	move.w	(a3)+,d0				*  8
+	bmi	1f					* 
+	
+	move.w	d1,-2(a3)				* 12
+	
+	*-- PatGenTblのアドレス
+	lea	(a2,d0.w),a4				* 12
+	
+	*-- SprPCGエリアのアドレス
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	(a0,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	.rept 8
+	move.b	(a4)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a5)+			* 
+	.endm
+	
+1:
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA1_intr_7				* 10
+	
+	
+	
+	*-- スプライトアトリビュートテーブルアップデート -------
+GRA1_intr_8:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトアトリビュート変更テーブル
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*-- テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*--
+	.rept	32
+	move.w	(a2)+,d0				*  8
+	bmi.s	1f					* 10/ 8 (T/F)
+	
+	* テーブルクリア
+	move.w	d1,-2(a2)				* 12
+	
+	* SprAtrTbl
+	lea	(a0,d0.w),a3				* 12
+	
+	*
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a3)+,d0				*  8
+	
+	cmpi.w	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.w	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a3)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a3)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a3)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	
+	*-- スプライトコントロールレジスタ設定
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	move.w	d3,(a1)+				*  8
+	move.w	d6,(a1)+				*  8
+	
+	bra	2f					* 10
+1:
+	addq.w	#8,a1					*  8
+2:
+	.endm
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA1_intr_1				* 10
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 2,3 垂直帰線割り込み処理
+*
+*	ScreenRefresh	... 画面再表示
+*	PatGenTblUpdate	... PCG設定
+
+GRA2_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA2_XX_skipUpdate			* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA2_XX_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA2_intr_2				* 10/ 8 (T/F)
+	
+	*-- PCG設定 ?
+	tas	PatGenTblUpdate(a6)			* 18
+	bpl	GRA2_intr_3				* 
+	
+	
+	*-- SprPatGenTbl 変更あり ?
+	tas	SprPatGenTblUpdate(a6)			* 18
+	bpl	GRA2_intr_6				* 
+	
+GRA2_intr_7:
+	*-- SprAtrTbl 変更あり ?
+	tas	SprAtrTblUpdate(a6)			* 18
+	bpl	GRA2_intr_8				*
+	
+	
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA2_intr_1:
+GRA2_XX_procInt:
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	RESTORE_STACK					* 
+GRA2_XX_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+	
+	
+	*-- BGデータエリア設定 -----------------------------
+GRA2_intr_2:
+	*-- PatGenTblUpdate フラグクリア
+	moveq.l	#-1,d0					*  4
+	move.w	d0,PatGenTblUpdate(a6)			* 12
+	
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- BGデータエリアの先頭アドレス
+	lea	BGDATAarea,a0				* 12
+	
+	*-- パターンネームテーブルの先頭アドレス
+	movea.l	PatNameTbl(a6),a1			* 16
+	
+	*-- BGデータエリア設定
+	moveq.l	#0,d0					*  4
+	moveq.l	#24-1,d1				*  4
+@@:
+	.rept	32
+	move.b	(a1)+,d0				*  8
+	move.w	d0,(a0)+				*  8
+	.endm
+	
+	lea	32*2(a0),a0				*  8
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	bra	@f					* 10
+	
+	*-- PCG設定 ----------------------------------------
+GRA2_intr_3:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+@@:	*-- PCGエリアの先頭アドレス
+	lea	PCGarea,a0				* 12
+	
+	*-- PCG設定データ変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- PatGenTbl の先頭アドレス
+	movea.l	PatGenTbl(a6),a2			* 16
+	
+	*-- ColorTbl の先頭アドレス
+	movea.l	ColorTbl(a6),a3				* 16
+	
+	*-- PCG変換マスク値
+	moveq.l	#%1111_0000,d1				*  4
+	
+	*-- PCG設定
+	move.w	#256-1,d5				*  8
+@@:
+	.rept 8
+	*-- PatGenTbl から１ライン取り出し
+	move.b	(a2)+,-(sp)				* 12
+	move.w	(sp)+,d0				*  8
+	
+	*-- ColorTbl からデータ取り出し
+	move.b	(a3)+,d3				*  8
+	
+	*-- パターンの１の色
+	move.b	d3,d0					*  4
+	and.b	d1,d0					*  4
+	move.l	(a1,d0.w),d4				* 18
+	
+	*-- パターンの０の色
+	move.b	d3,d0					*  4
+	lsl.b	#4,d0					* 14
+	or.l	4(a1,d0.w),d4				* 20
+	
+	*-- PCGデータ書き込み
+	move.l	d4,(a0)+				* 12
+	.endm
+	
+	dbra	d5,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- スプライトパターン設定 -------------------------
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- Sprパターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	*-- パターン書き込み
+	.rept 8
+	move.b	(a2)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a0)+			* 
+	.endm
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	
+	*-- Sprパターンジェネレータテーブル変更テーブルクリア
+	lea	SprPatGenUpdateTbl(a6),a0		*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#256/4-1,d1				*  4
+@@:
+	move.l	d0,(a0)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	*-- ｽﾌﾟﾗｲﾄｱﾄﾘﾋﾞｭｰﾄﾃｰﾌﾞﾙ設定 ------------------------
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*--
+	.rept	32
+	*--
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a0)+,d0				*  8
+	
+	cmpi.b	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.w	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a0)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a0)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a0)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	move.w	d3,-(sp)				*  8
+	move.b	d4,(sp)					*  8
+	move.w	(sp)+,d3				*  8
+	andi.w	#%0000_1111_1111_1111,d3		*  8
+	
+	
+	*-- スプライトコントロールレジスタ設定
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	move.w	d3,(a1)+				*  8
+	move.w	d6,(a1)+				*  8
+	.endm
+	
+	
+	*-- スプライトアトリビュート変更テーブルクリア
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	moveq.l	#-1,d0					*  4
+	moveq.l	#32/4-1,d1				*  4
+@@:
+	move.l	d0,(a2)+				* 
+	dbra	d1,@b					* 10/14 (T/F)
+	
+	
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	bra	GRA2_intr_1				* 10
+	
+	
+	
+	*-- スプライトパターンジェネレータテーブルアップデート -------
+GRA2_intr_6:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	*-- PCGエリア
+	lea	SprPCGarea,a0				* 12
+	
+	*-- PCG変換テーブル
+	lea	PCGdatatbl,a1				* 12
+	
+	*-- パターンジェネレータテーブル
+	movea.l	SprPatGenTbl(a6),a2			* 16
+	
+	*-- パターンジェネレータテーブル変更テーブル
+	lea	SprPatGenUpdateTbl(a6),a3		*  8
+	
+	*-- d1.w : テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*-- 
+	clr.w	-(sp)					* 
+	
+	*-- d4.w : ループカウンタ
+	moveq.l	#256/8-1,d4				*  4
+@@:	
+	.rept 8
+	move.w	(a3)+,d0				*  8
+	bmi	1f					* 
+	
+	move.w	d1,-2(a3)				* 12
+	
+	*-- PatGenTblのアドレス
+	lea	(a2,d0.w),a4				* 12
+	
+	*-- SprPCGエリアのアドレス
+	add.w	d0,d0					*  4
+	add.w	d0,d0					*  4
+	lea	(a0,d0.w),a5				* 12
+	
+	*-- パターン書き込み
+	.rept 8
+	move.b	(a4)+,(sp)				* 12
+	move.w	(sp),d0					*  8
+	move.l	16(a1,d0.w),(a5)+			* 
+	.endm
+	
+1:
+	.endm
+	
+	dbra	d4,@b					* 10/14 (T/F)
+	
+	*--
+	addq.w	#2,sp					*  8
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA2_intr_7				* 10
+	
+	
+	
+	*-- スプライトアトリビュートテーブルアップデート -------
+GRA2_intr_8:
+	*-- スプライト/BG 非表示
+	move.b	(BGcontrol),d2				* 16
+	clr.b	(BGcontrol)				* 20
+	
+	
+	*-- スプライトアトリビュートテーブル
+	movea.l	SprAtrTbl(a6),a0			* 16
+	
+	*-- スプライトスクロールレジスタ
+	lea	SprScrollReg,a1				* 12
+	
+	*-- スプライトアトリビュート変更テーブル
+	lea	SprAtrUpdateTbl(a6),a2			*  8
+	
+	*-- スプライトカラー指定用
+	moveq.l	#0,d3					*  4
+	
+	*-- スプライト表示/非表示フラグ
+	moveq.l	#%0000_0011,d6				*  4
+	
+	*-- テーブルクリア用
+	moveq.l	#-1,d1					*  4
+	
+	*--
+	.rept	32
+	move.w	(a2)+,d0				*  8
+	bmi.s	1f					* 10/ 8 (T/F)
+	
+	* テーブルクリア
+	move.w	d1,-2(a2)				* 12
+	
+	* SprAtrTbl
+	lea	(a0,d0.w),a3				* 12
+	
+	*
+	moveq.l	#0,d0					*  4
+	
+	*-- Y座標
+	move.b	(a3)+,d0				*  8
+	
+	cmpi.w	#208,d0					*  8
+	bne.s	@f					* 10/ 8 (T/F)
+	clr.w	d6					*  4
+@@:
+	cmpi.w	#212,d0					*  8
+	bcs.s	@f					* 10/ 8 (T/F)
+	ext.w	d0					*  4
+@@:
+	addi.w	#17,d0					*  8	ｽﾌﾟﾗｲﾄの最上端は 255
+	
+	*-- X座標
+	swap.w	d0					*  4
+	move.b	(a3)+,d0				*  8
+	addi.w	#16,d0					*  8
+	
+	*-- パターン番号
+	move.b	(a3)+,d3				*  8
+	lsr.b	#2,d3					* 10
+	addi.w	#64,d3					*  8
+	
+	*-- Early Clock & カラーコード
+	move.b	(a3)+,d4				*  8
+	
+	bpl.s	@f					* 10/ 8 (T/F)
+	subi.w	#32,d0					*  8
+@@:
+	move.w	d3,-(sp)				*  8
+	move.b	d4,(sp)					*  8
+	move.w	(sp)+,d3				*  8
+	andi.w	#%0000_1111_1111_1111,d3		*  8
+	
+	
+	*-- スプライトコントロールレジスタ設定
+	;X,Y
+	swap.w	d0					*  4
+	move.l	d0,(a1)+				* 12
+	;Color, SPAT#
+	move.w	d3,(a1)+				*  8
+	;PRW
+	move.w	d6,(a1)+				*  8
+	
+	bra	2f					* 10
+1:
+	addq.w	#8,a1					*  8
+2:
+	.endm
+	
+	
+	*-- スプライト/BG 表示を元に戻す
+	move.b	d2,(BGcontrol)				* 16
+	
+	
+	bra	GRA2_intr_1				* 10
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 4 垂直帰線割り込み処理
+*
+
+GRA4_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA4_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA4_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA4_intr_2				* 10/ 8 (T/F)
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA4_intr_1:
+GRA4_procInt:
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	
+	*-- 画面再表示 -------------------------------------
+GRA4_intr_2:
+	
+	
+	
+	RESTORE_STACK					* 
+GRA4_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 5 垂直帰線割り込み処理
+*
+
+GRA5_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA5_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA5_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA5_intr_2				* 10/ 8 (T/F)
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA5_intr_1:
+GRA5_procInt:
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	
+	*-- 画面再表示 -------------------------------------
+GRA5_intr_2:
+	
+	
+	
+	RESTORE_STACK					* 
+GRA5_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 6 垂直帰線割り込み処理
+*
+
+GRA6_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA6_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA6_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA6_intr_2				* 10/ 8 (T/F)
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA6_intr_1:
+GRA6_procInt:
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	
+	*-- 画面再表示 -------------------------------------
+GRA6_intr_2:
+	
+	
+	
+	RESTORE_STACK					* 
+GRA6_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* GRAPHIC 7 垂直帰線割り込み処理
+*
+
+GRA7_VDISP_interrupt:
+	
+	movem.l	d0-d7/a0-a6,-(sp)			* 
+	
+	*-- FtblinIOのアドレス
+	lea	FtblinIO,a6				* 12
+	
+	;--
+	tas.b	inScrUpdate(a6)				* 18
+	bmi	GRA7_skipUpdate				* 
+	
+	;-- VDISP 割り込みの禁止
+	bclr.b	#6,(MFP_IERB)				* 
+	
+	;-- キーボードLED設定
+	KEYBOARD_LED					* 
+	
+	;-- 割り込みレベルを割り込み発生前の状態に設定
+	move.w	(8+7)*4(sp),d1		* 割り込み発生時の SR 取得
+	or.w	#$2000,d1		* Supervisor State : 1 = Supervisor
+	move.w	d1,sr			* 割り込み時の SR に設定
+	
+	;--
+	SAVE_STACK					* 
+	
+	;-- 画面更新の間引き
+	subq.w	#1,cnt_CountUpdate(a6)			* 16
+	bne.s	GRA7_procInt				* 10/ 8 (T/F)
+	move.w	CountUpdate(a6),cnt_CountUpdate(a6)	* 20
+	
+	
+	*-- 画面再表示 ?
+	tas	ScreenRefresh(a6)			* 18
+	bpl.s	GRA7_intr_2				* 10/ 8 (T/F)
+	
+	*-- Z80 割り込み処理 -------------------------------
+GRA7_intr_1:
+GRA7_procInt:
+	Z80INTERRUPT					* 
+	
+	;--
+	clr.b	inScrUpdate(a6)				* 
+	
+	;-- VDISP 割り込み許可
+	bset.b	#6,(MFP_IERB)				* 
+	
+	
+	*-- 画面再表示 -------------------------------------
+GRA7_intr_2:
+	
+	
+	
+	RESTORE_STACK					* 
+GRA7_skipUpdate:
+	movem.l	(sp)+,d0-d7/a0-a6			* 
+	
+	rte						* 20
+
+
+
+
+
+	.include gra2test.has
+
+
+	.quad
+	.ds.b	8*1024
+scrupd_stack:
+
+Save_sp:	.ds.l	1
+
+debugModeCounter:	.dc.w	0
+
+
+tableSCRrel:
+	N: = 0
+	.rept RELADNUM
+	.dc.l	RELADR_%N
+	N: = N+1
+	.endm
+	.dc.l	0
+
+
+	.end
+
+

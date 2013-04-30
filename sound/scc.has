@@ -1,0 +1,1645 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+;
+; PSG Driver
+;
+
+
+
+	.include doscall.mac
+	.include ../startup/version.equ
+	.include ../Z80/z80emu.equ
+	.if MPU.eq.68000
+		.include ../work/000/flagtbl.equ
+	.else
+		.fail 1
+	.endif
+	.include ../IO/x68k.equ
+
+
+SCC_ch8	.equ	1
+
+
+CR	.equ	$0d
+LF	.equ	$0a
+TAB	.equ	$09
+EOF	.equ	$1a
+
+
+
+PSG_chA_noise_ON	.equ	PSGwork+0
+PSG_chB_noise_ON:	.equ	PSGwork+1
+PSG_chC_noise_ON:	.equ	PSGwork+2
+PSG_noise_ON:		.equ	PSG_chA_noise_ON
+
+PSG_chA_env_used:	.equ	PSGwork+4
+PSG_chB_env_used:	.equ	PSGwork+5
+PSG_chC_env_used:	.equ	PSGwork+6
+PSG_env_used:		.equ	PSG_chA_env_used
+
+PSG_env_reset:		.equ	PSGwork+8
+
+PSG_env_data:		.equ	PSGwork+10
+
+
+
+PSG_VOL_00: = 127
+PSG_VOL_01: =  66
+PSG_VOL_02: =  50
+PSG_VOL_03: =  42
+PSG_VOL_04: =  34
+PSG_VOL_05: =  30
+PSG_VOL_06: =  26
+PSG_VOL_07: =  22
+PSG_VOL_08: =  18
+PSG_VOL_09: =  16
+PSG_VOL_10: =  14
+PSG_VOL_11: =  12
+PSG_VOL_12: =  10
+PSG_VOL_13: =   8
+PSG_VOL_14: =   6
+PSG_VOL_15: =   4
+
+	.text
+
+
+;----------------------------------------------------------------------------------------------
+entrance:
+	;-- ファイルの先頭は bra で読み込み領域の最後に分岐
+	bra.w	dummyEntrance
+	
+	;---
+	; 識別文字列
+	.dc.b	'emes'
+	VERSION_CODE
+	
+	
+;-- 起動時
+	.dc.w	start-top			; [00]
+
+;-- 初期化
+	.dc.w	init-top			; [01]
+
+;-- IN
+	.dc.w	readPSG_00-top			; [02]
+	.dc.w	readPSG_01-top			; [03]
+	.dc.w	readPSG_02-top			; [04]
+	.dc.w	readPSG_03-top			; [05]
+	.dc.w	readPSG_04-top			; [06]
+	.dc.w	readPSG_05-top			; [07]
+	.dc.w	readPSG_06-top			; [08]
+	.dc.w	readPSG_07-top			; [09]
+	.dc.w	readPSG_08-top			; [0a]
+	.dc.w	readPSG_09-top			; [0b]
+	.dc.w	readPSG_10-top			; [0c]
+	.dc.w	readPSG_11-top			; [0d]
+	.dc.w	readPSG_12-top			; [0e]
+	.dc.w	readPSG_13-top			; [0f]
+	.dc.w	readPSG_14-top			; [10]
+	.dc.w	readPSG_15-top			; [11]
+	
+	.dc.w	writePSG_00-top			; [12]
+	.dc.w	writePSG_01-top			; [13]
+	.dc.w	writePSG_02-top			; [14]
+	.dc.w	writePSG_03-top			; [15]
+	.dc.w	writePSG_04-top			; [16]
+	.dc.w	writePSG_05-top			; [17]
+	.dc.w	writePSG_06-top			; [18]
+	.dc.w	writePSG_07-top			; [19]
+	.dc.w	writePSG_08-top			; [1a]
+	.dc.w	writePSG_09-top			; [1b]
+	.dc.w	writePSG_10-top			; [1c]
+	.dc.w	writePSG_11-top			; [1d]
+	.dc.w	writePSG_12-top			; [1e]
+	.dc.w	writePSG_13-top			; [1f]
+	.dc.w	writePSG_14-top			; [20]
+	.dc.w	writePSG_15-top			; [21]
+
+	.dc.w	writeSCC-top			; [22]
+	.dc.w	0				; [23]
+	.dc.w	0				; [24]
+	.dc.w	0				; [25]
+	.dc.w	0				; [26]
+	.dc.w	0				; [27]
+	.dc.w	0				; [28]
+	.dc.w	0				; [29]
+	.dc.w	0				; [2a]
+	.dc.w	0				; [2b]
+	.dc.w	0				; [2c]
+	.dc.w	0				; [2d]
+	.dc.w	0				; [2e]
+	.dc.w	0				; [2f]
+	.dc.w	0				; [30]
+	.dc.w	0				; [31]
+	.dc.w	0				; [32]
+	.dc.w	0				; [33]
+	.dc.w	0				; [34]
+	.dc.w	0				; [35]
+	.dc.w	0				; [36]
+	.dc.w	0				; [37]
+	.dc.w	0				; [38]
+	.dc.w	0				; [39]
+	.dc.w	0				; [3a]
+	.dc.w	0				; [3b]
+	.dc.w	0				; [3c]
+	.dc.w	0				; [3d]
+	.dc.w	0				; [3e]
+	.dc.w	0				; [3f]
+
+
+
+
+
+top:
+	nop
+
+;----------------------------------------------------------------------------------------------
+;
+;  chA 音程分周比	R01:R00  PSG_chA_pitch(regZjmp).w
+;  chB 音程分周比	R03:R02  PSG_chB_pitch(regZjmp).w
+;  chC 音程分周比	R05:R04  PSG_chC_pitch(regZjmp).w
+;  ノイズ分周比		    R06  PSG_noise_pitch(regZjmp).b
+;  Enable		    R07  PSG_enable(regZjmp).b
+;  chA 音量		    R08  PSG_chA_volume(regZjmp).b
+;  chB 音量		    R09  PSG_chB_volume(regZjmp).b
+;  chC 音量		    R10  PSG_chC_volume(regZjmp).b
+;  エンベロープ周期	R12:R11  PSG_env_cycle(regZjmp).w
+;  エンベロープ波形	    R13  PSG_env_form(regZjmp).b
+;  
+;
+;----------------------------------------------------------------------------------------------
+
+
+
+;----------------------------------------------------------------------------------------------
+; 組み込み時に呼ばれる
+start:
+	;-- タイトル表示
+	bsr	title
+	
+	rts
+
+
+
+
+;----------------------------------------------------------------------------------------------
+; 初期化
+
+init:
+
+
+;	trap	#9
+
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;	OPM_Data
+
+
+	;-- 全ﾁｬﾝﾈﾙキーオフ
+	move.w	#7,d0
+@@:
+	bsr	waitOPM
+	move.b	#$08,(a0)
+	bsr	waitOPM
+	move.b	d0,(a1)
+	dbra	d0,@b
+
+	;-- LFO リセット
+	bsr	waitOPM
+	move.b	#$01,(a0)
+	bsr	waitOPM
+	move.b	#$02,(a1)
+
+	;-- LFO スタート
+	bsr	waitOPM
+	move.b	#$01,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- ノイズ制御
+	bsr	waitOPM
+	move.b	#$0F,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- LFO 周波数
+	bsr	waitOPM
+	move.b	#$18,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- AMD = 0
+	bsr	waitOPM
+	move.b	#$19,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- AMD = 0 (本当は PMD = 0 ??)
+	bsr	waitOPM
+	move.b	#$19,(a0)
+;;;	move.b	#$1a,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- LFO 波形
+	bsr	waitOPM
+	move.b	#$1B,(a0)
+	bsr	waitOPM
+	move.b	#$00,(a1)
+
+	;-- 
+	moveq.l	#$20,d0
+@@:
+	bsr	waitOPM
+	move.b	d0,(a0)
+	bsr	waitOPM
+	move.b	#$ff,(a1)
+	addq.b	#1,d0
+	bne	@b
+
+	;---------- SCC
+	
+	;-- OPM ch1
+	moveq.l	#$20+0,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	;-- OPM ch2
+	moveq.l	#$20+1,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	;-- OPM ch3
+	moveq.l	#$20+2,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	;-- OPM ch4
+	moveq.l	#$20+3,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+.if SCC_ch8
+	;-- OPM ch8
+	moveq.l	#$20+7,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice
+.endif
+
+
+	;---------- PSG
+
+	;-- OPM ch5
+	moveq.l	#$20+4,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	
+	;-- OPM ch6
+	moveq.l	#$20+5,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	
+	;-- OPM ch7
+	moveq.l	#$20+6,d0			;
+	lea	voice_psg(pc),a0		;
+	bsr	setVoice			;
+	
+	
+.if SCC_ch8.eq.0
+	;-- OPM ch8 ノイズ音色
+	moveq.l	#$20+7,d0			;
+	lea	voice_noise(pc),a0		;
+	bsr	setVoice
+.endif
+	
+	
+	;--
+	move.b	#%0000_0000,PSG_chA_env_used(regFtbl)
+	move.b	#%0000_0000,PSG_chB_env_used(regFtbl)
+	move.b	#%0000_0000,PSG_chC_env_used(regFtbl)
+	
+	move.b	#31,PSG_env_data(regFtbl)
+	move.b	#0,PSG_env_data+1(regFtbl)
+
+
+	rts					;
+
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+
+;-- chA 音程分周比
+;	R01:R00  PSG_chA_pitch(regZjmp).w
+readPSG_00:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chA_pitch+1(regZjmp),d1	;
+	
+	rts					;
+
+readPSG_01:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chA_pitch+0(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- chB 音程分周比
+;	R03:R02  PSG_chB_pitch(regZjmp).w
+readPSG_02:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chB_pitch+1(regZjmp),d1	;
+	
+	rts					;
+
+readPSG_03:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chB_pitch+0(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- chC 音程分周比
+;	R04:R05  PSG_chC_pitch(regZjmp).w
+readPSG_04:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chC_pitch+1(regZjmp),d1	;
+	
+	rts					;
+
+readPSG_05:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chC_pitch+0(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- ノイズ分周比
+;	    R06  PSG_noise_pitch(regZjmp).b
+readPSG_06:
+
+
+;	trap	#9
+
+
+	move.b	PSG_noise_pitch(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- Enable
+;	    R07  PSG_enable(regZjmp).b
+readPSG_07:
+
+
+;	trap	#9
+
+
+	move.b	PSG_enable(regZjmp),d1		;
+	
+	rts					;
+
+
+;-- chA 音量
+;	    R08  PSG_chA_volume(regZjmp).b
+readPSG_08:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chA_volume(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- chB 音量
+;	    R09  PSG_chB_volume(regZjmp).b
+readPSG_09:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chB_volume(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- chC 音量
+;	    R10  PSG_chC_volume(regZjmp).b
+readPSG_10:
+
+
+;	trap	#9
+
+
+	move.b	PSG_chC_volume(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- エンベロープ周期
+;	R12:R11  PSG_env_cycle(regZjmp).w
+readPSG_11:
+
+
+;	trap	#9
+
+
+	move.b	PSG_env_cycle+1(regZjmp),d1	;
+	
+	rts					;
+
+readPSG_12:
+
+
+;	trap	#9
+
+
+	move.b	PSG_env_cycle+0(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- エンベロープ波形
+;	    R13  PSG_env_form(regZjmp).b
+readPSG_13:
+
+
+;	trap	#9
+
+
+	move.b	PSG_env_form(regZjmp),d1	;
+	
+	rts					;
+
+
+;-- ジョイスティック読み込み
+;	    R14
+readPSG_14:
+
+
+;	trap	#9
+
+
+	moveq.l	#%0100_0000,d0			*  4
+	and.b	PSG_reg15(regZjmp),d0		* 
+	bne.s	@f
+	
+	;-- Joy 1
+	move.b	(Joystick1),d0
+	bra	1f
+	
+@@:	;-- Joy 2
+	move.b	(Joystick2),d0
+1:
+	lea	JoyConvTable(regFtbl),a0
+	move.b	(a0,d0.w),d1
+	
+	rts
+
+
+;--
+;	    R15
+readPSG_15:
+
+
+;	trap	#9
+
+
+	move.b	PSG_reg15(regZjmp),d1		* 
+	
+	rts					* 16
+
+
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+waitOPM:
+@@:
+	nop
+	tst.b	(OPM_Data)			;
+	bmi.s	@b				;
+	
+	rts					;
+
+
+
+;---------------------
+; d0.b ... reg num
+; a0.l ... voice data
+
+setVoice:
+	;-- R/L, FL, CON
+	bsr	waitOPM				;
+	move.b	d0,(OPM_Address)		;
+	bsr	waitOPM				;
+	move.b	(a0)+,(OPM_Data)		;
+	
+	;-- PMS, AMS
+	addi.b	#$18,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(OPM_Address)		;
+	bsr	waitOPM				;
+	move.b	(a0)+,(OPM_Data)		;
+	
+	;--
+	moveq.l	#4*6-1,d1			;
+@@:
+	addq.b	#$08,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(OPM_Address)		;
+	bsr	waitOPM				;
+	move.b	(a0)+,(OPM_Data)		;
+	
+	dbra	d1,@b				;
+	
+	rts					;
+
+
+	.even
+voice_psg:
+	;	 RL FL  CON
+;;;	dc.b	%11_111_101,000	; PMS/AMS
+	dc.b	%00_111_101,000	; PMS/AMS
+	dc.b	002,001,001,001	; DT1/MUL
+	dc.b	028,127,127,127	; TL
+	dc.b	031,031,031,031	; KS/AR
+	dc.b	000,000,000,000	; AMS EN/D1R
+	dc.b	000,000,000,000	; DT2/D2R
+	dc.b	015,015,015,015	; D1L/RR
+	;	M1  M2  C1  C2
+
+voice_noise:
+	;	 RL FL  CON
+;;	dc.b	%11_000_111,000	; PMS/AMS
+	dc.b	%11_000_111,000	; PMS/AMS
+	dc.b	001,001,001,001	; DT1/MUL
+	dc.b	127,127,127,127	; TL
+	dc.b	031,031,031,031	; KS/AR
+	dc.b	000,000,000,000	; AMS EN/D1R
+	dc.b	000,000,000,000	; DT2/D2R
+	dc.b	015,015,015,015	; D1L/RR
+	;	M1  M2  C1  C2
+	.even
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R0 チャンネル A 音程分周比（下位）
+;	d0.b ... data
+writePSG_00:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_chA_pitch+1(regZjmp)	;
+	
+	moveq.l	#$20+4,d0			;
+	move.w	PSG_chA_pitch(regZjmp),d1	;
+	
+	bra	setOPMkeycode			;
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R1 チャンネル A 音程分周比（上位）
+;	d0.b ... data
+writePSG_01:
+
+
+;	trap	#9
+
+
+	andi.b	#$0f,d0				;
+	move.b	d0,PSG_chA_pitch(regZjmp)	;
+	
+	moveq.l	#$20+4,d0			;
+	move.w	PSG_chA_pitch(regZjmp),d1	;
+	
+	bra	setOPMkeycode			;
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R2 チャンネル B 音程分周比（下位）
+;	d0.b ... data
+writePSG_02:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_chB_pitch+1(regZjmp)	;
+	
+	moveq.l	#$20+5,d0			;
+	move.w	PSG_chB_pitch(regZjmp),d1	;
+	
+	bra	setOPMkeycode			;
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R3 チャンネル B 音程分周比（上位）
+;	d0.b ... data
+writePSG_03:
+
+
+;	trap	#9
+
+
+	andi.b	#$0f,d0				;
+	move.b	d0,PSG_chB_pitch(regZjmp)	;
+	
+	moveq.l	#$20+5,d0			;
+	move.w	PSG_chB_pitch(regZjmp),d1	;
+	
+	bra	setOPMkeycode			;
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R4 チャンネル C 音程分周比（下位）
+;	d0.b ... data
+writePSG_04:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_chC_pitch+1(regZjmp)	;
+	
+	moveq.l	#$20+6,d0			;
+	move.w	PSG_chC_pitch(regZjmp),d1	;
+	
+	bra	setOPMkeycode			;
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R5 チャンネル C 音程分周比（上位）
+;	d0.b ... data
+writePSG_05:
+
+
+;	trap	#9
+
+
+	andi.b	#$0f,d0				;
+	move.b	d0,PSG_chC_pitch(regZjmp)	;
+	
+	moveq.l	#$20+6,d0			;
+	move.w	PSG_chC_pitch(regZjmp),d1	;
+	
+	
+	
+	;--
+	; d0.b ... reg num
+	; d1.w ... data
+setOPMkeycode:
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;	OPM_Data
+	
+	;--
+	add.w	d1,d1				;
+	move.b	tab_PSGtoOPM_pitch(pc,d1.w),d2	;
+	bmi.s	@f				;
+	
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	move.b	#%11_111_101,(a1)		;	R/L 出力 ON, FL=7, CON=5
+	
+	;-- 音階(KC)設定
+	addq.b	#8,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM
+	move.b	d2,(a1)				;
+	
+	;-- 音階微調整(KF)設定
+	addq.b	#8,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	move.b	tab_PSGtoOPM_pitch+1(pc,d1.w),(a1)	;
+	
+	rts					;
+
+@@:
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	;-- R/L 出力 OFF, FL=7, CON=5
+	move.b	#%00_111_101,(a1)		;
+	
+	rts
+
+
+;---
+
+	.include ../work/share/psg2opm.inc
+
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R6 ノイズ分周比
+;	d0.b ... data
+writePSG_06:
+
+
+;	trap	#9
+
+
+	andi.b	#%0001_1111,d0			;
+	move.b	d0,PSG_noise_pitch(regZjmp)	;
+	
+.if SCC_ch8.eq.0
+	lea	OPM_Data,a0			;
+	bsr	waitOPM				;
+	move.b	#$0f,-2(a0)			;	OPM $0f ノイズ制御
+	bsr	waitOPM				;
+	ori.b	#%1000_0000,d0			;
+	move.b	d0,(a0)				;
+.endif
+	
+	rts
+
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R7 Enable
+;	d0.b ... data
+writePSG_07:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_enable(regZjmp)		;
+	
+	
+	;-- Noise
+	lsl.b	#3,d0				;
+	scc.b	PSG_chC_noise_ON(regFtbl)	;
+	add.b	d0,d0				;
+	scc.b	PSG_chB_noise_ON(regFtbl)	;
+	add.b	d0,d0				;
+	scc.b	PSG_chA_noise_ON(regFtbl)	;
+	
+	
+	
+	;-- OPM R$08 Key ON/OFF
+	lea	OPM_Data,a0		* 12
+	bsr	waitOPM			* 18
+	move.b	#$08,-2(a0)		* 16
+	
+	;-- 各チャンネル ON/OFF 設定
+	; d0.b ... CBAx xxxx
+	; a0.l ... OPM_Data
+
+	;-- チャンネル 8 ノイズ設定
+.if SCC_ch8.eq.0
+	moveq.l	#%0_1111_111,d1			;
+	tst.l	PSG_noise_ON(regFtbl)		;
+	bne.s	@f				;
+	moveq.l	#%0_0000_111,d1			;
+@@:
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+.endif
+	
+	
+	;-- チャンネル 7 PSG C ON/OFF 設定
+	moveq.l	#%0_1111_110,d1			;
+	add.b	d0,d0				;
+	bcc.s	@f				;
+	moveq.l	#%0_0000_110,d1			;
+@@:
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	
+	
+	;-- チャンネル 6 PSG B ON/OFF 設定
+	moveq.l	#%0_1111_101,d1			;
+	add.b	d0,d0				;
+	bcc.s	@f				;
+	moveq.l	#%0_0000_101,d1			;
+@@:
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	
+	
+	;-- チャンネル 5 PSG A ON/OFF 設定
+	moveq.l	#%0_1111_100,d1			;
+	add.b	d0,d0				;
+	bcc.s	@f				;
+	moveq.l	#%0_0000_100,d1			;
+@@:
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	
+	
+	rts					;
+
+
+
+
+;----------------------------------------------------------------------------------------------
+; d1.b ... reg num
+; d2.w ... ATR:D2R
+set_envelope:
+	;-- noise ON ?
+.if SCC_ch8.eq.0
+	beq.s	@f				;
+	
+	;-- ch8 C2:DT2, D2R
+	bsr	waitOPM				;
+	move.b	#$df,(a0)			;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- ch8 C2:KS, AR
+	bsr	waitOPM				;
+	move.b	#$9f,(a0)			;
+	bsr	waitOPM				;
+	move.w	d2,-(sp)			;
+	move.b	(sp)+,(a1)			;
+	
+@@:	
+.endif
+	;-- $c8+n M2:DT2, D2R
+	addi.b	#$60,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $d0+n C1:DT2, D2R
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $d8+n C2:DT2, D2R
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $88+n M2:KS, AR
+	move.w	d2,-(sp)			;
+	move.b	(sp)+,d2			;
+	subi.b	#$50,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $90+n C1:KS, AR
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $98+n C2:KS, AR
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d2,(a1)				;
+	
+	;-- $68+n
+	subi.b	#$30,d1				;
+	
+	
+	rts					;
+
+
+
+;----------------------------------------------------------------------------------------------
+;--- PSG R8 チャンネル A 音量
+;	d0.b ... data
+;		b4 == 1 ... use envelope
+writePSG_08:
+
+
+;	trap	#9
+
+
+	andi.w	#%0001_1111,d0			;
+	move.b	d0,PSG_chA_volume(regZjmp)	;
+	
+	;-- ch5
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;
+	moveq.l	#$68+4,d1			;
+	
+	;--
+	move.b	PSG_chA_env_used(regFtbl),d2	;
+	eor.b	d0,d2				;  4
+	andi.b	#%0001_0000,d2			;  8
+	beq.s	chA_set_volume			;
+	
+	;--
+	eor.b	d2,PSG_chA_env_used(regFtbl)	;
+	
+	btst.l	#4,d0				; 
+	beq.s	@f				;
+	
+	;-- エンベロープ設定
+	move.w	PSG_env_data(regFtbl),d2	;
+	
+	bra	1f				;
+	
+	
+@@:	;-- エンベロープ未使用
+	move.b	d2,PSG_env_reset(regFtbl)	; 12
+	
+	move.w	#$1f00,d2			;
+1:
+	tst.b	PSG_chA_noise_ON(regFtbl)	;
+	bsr	set_envelope			;
+	
+	
+chA_set_volume:
+	;-- PSG -> OPM volume
+	move.b	tab_chA_vol(pc,d0.w),d0		;
+	
+	tst.b	PSG_chA_noise_ON(regFtbl)	;
+	
+	
+	;--
+	; d0.b ... vol
+	; d1.b ... reg num
+	; ccr  ... noise on/off
+set_volume:
+	;-- noise
+.if SCC_ch8.eq.0
+	beq.s	@f				;
+	
+	;- ch8 C2:TL
+	bsr	waitOPM				;
+	move.b	#$7f,(a0)			;	C2:TL
+	bsr	waitOPM				;
+	move.b	d0,(a1)				;
+@@:
+.endif
+	;-- M2:TL
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d0,(a1)				;
+	
+	;-- C1:TL
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d0,(a1)				;
+	
+	;-- C2:TL
+	addq.b	#8,d1				;
+	bsr	waitOPM				;
+	move.b	d1,(a0)				;
+	bsr	waitOPM				;
+	move.b	d0,(a1)				;
+	
+	;-- ノイズ分周比設定
+.if SCC_ch8.eq.0
+	move.b	PSG_noise_pitch(regZjmp),d0	;
+	
+	bsr	waitOPM				;
+	move.b	#$0f,(a0)			;	OPM $0f ノイズ制御
+	bsr	waitOPM				;
+	ori.b	#%1000_0000,d0			;
+	move.b	d0,(a1)				;
+.endif
+	
+	
+	rts					;
+
+tab_chA_vol:
+	;-- エンベロープ未使用
+	.dc.b	PSG_VOL_00,PSG_VOL_01,PSG_VOL_02,PSG_VOL_03
+	.dc.b	PSG_VOL_04,PSG_VOL_05,PSG_VOL_06,PSG_VOL_07
+	.dc.b	PSG_VOL_08,PSG_VOL_09,PSG_VOL_10,PSG_VOL_11
+	.dc.b	PSG_VOL_12,PSG_VOL_13,PSG_VOL_14,PSG_VOL_15
+
+	;-- エンベロープ使用
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.even
+
+
+;----------------------------------------------------------------------------------------------
+;--- PSG R9 チャンネル B 音量
+;	d0.b ... data
+writePSG_09:
+
+
+;	trap	#9
+
+
+	andi.w	#%0001_1111,d0			;
+	move.b	d0,PSG_chB_volume(regZjmp)	;
+	
+	;-- ch6
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;
+	moveq	#$68+5,d1			;
+	
+	;--
+	move.b	PSG_chB_env_used(regFtbl),d2	;
+	eor.b	d0,d2				;  4
+	andi.b	#%0001_0000,d2			;  8
+	beq.s	chB_set_volume			;
+	
+	;--
+	eor.b	d2,PSG_chB_env_used(regFtbl)	;
+	
+	btst.l	#4,d0				;
+	beq.s	@f				;
+	
+	;-- エンベロープ設定
+	move.w	PSG_env_data(regFtbl),d2	;
+	
+	bra	1f				;
+	
+@@:	;-- エンベロープ未使用
+	move.b	d2,PSG_env_reset(regFtbl)	; 12
+	
+	move.w	#$1f00,d2			;
+1:
+	tst.b	PSG_chB_noise_ON(regFtbl)	;
+	bsr	set_envelope			;
+	
+	
+chB_set_volume:
+	;-- PSG -> OPM volume
+	move.b	tab_chB_vol(pc,d0.w),d0		;
+	
+	tst.b	PSG_chB_noise_ON(regFtbl)	;
+	
+	bra	set_volume			;
+
+
+tab_chB_vol:
+	;-- エンベロープ未使用
+	.dc.b	PSG_VOL_00,PSG_VOL_01,PSG_VOL_02,PSG_VOL_03
+	.dc.b	PSG_VOL_04,PSG_VOL_05,PSG_VOL_06,PSG_VOL_07
+	.dc.b	PSG_VOL_08,PSG_VOL_09,PSG_VOL_10,PSG_VOL_11
+	.dc.b	PSG_VOL_12,PSG_VOL_13,PSG_VOL_14,PSG_VOL_15
+
+	;-- エンベロープ使用
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.even
+
+
+
+;----------------------------------------------------------------------------------------------
+;--- PSG R10 チャンネル C 音量
+;	d1.b ... data
+writePSG_10:
+
+
+;	trap	#9
+
+
+	andi.w	#%0001_1111,d0			;
+	move.b	d0,PSG_chC_volume(regZjmp)	;
+	
+	;-- ch7
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;
+	moveq	#$68+6,d1			;
+	
+	;--
+	move.b	PSG_chC_env_used(regFtbl),d2	;
+	eor.b	d2,d2				;  4
+	andi.b	#%0001_0000,d2			;  4
+	bne.s	chC_set_volume			;
+	
+	;--
+	eor.b	d2,PSG_chC_env_used(regFtbl)	;
+	
+	btst.l	#4,d0				;
+	beq.s	@f				;
+	
+	;-- エンベロープ設定
+	move.w	PSG_env_data(regFtbl),d2	;
+	
+	bra	1f				;
+	
+	
+@@:	;-- エンベロープ未使用
+	move.b	d2,PSG_env_reset(regFtbl)	; 12
+	
+	move.w	#$1f00,d2			;
+1:
+	tst.b	PSG_chC_noise_ON(regFtbl)	;
+	bsr	set_envelope			;
+	
+	
+chC_set_volume:
+	;-- PSG -> OPM volume
+	move.b	tab_chC_vol(pc,d0.w),d0		;
+	
+	tst.b	PSG_chC_noise_ON(regFtbl)	;
+	
+	bra	set_volume			;
+
+tab_chC_vol:
+	;-- エンベロープ未使用
+	.dc.b	PSG_VOL_00,PSG_VOL_01,PSG_VOL_02,PSG_VOL_03
+	.dc.b	PSG_VOL_04,PSG_VOL_05,PSG_VOL_06,PSG_VOL_07
+	.dc.b	PSG_VOL_08,PSG_VOL_09,PSG_VOL_10,PSG_VOL_11
+	.dc.b	PSG_VOL_12,PSG_VOL_13,PSG_VOL_14,PSG_VOL_15
+
+	;-- エンベロープ使用
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.dc.b	PSG_VOL_15,PSG_VOL_15,PSG_VOL_15,PSG_VOL_15
+	.even
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R11,R12 エンベロープ周期
+;	d0.b ... data
+writePSG_11:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_env_cycle+1(regZjmp)	;
+	
+	move.b	PSG_env_form(regZjmp),d0	;
+	
+	bra	setenv				;
+
+
+writePSG_12:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_env_cycle(regZjmp)	;
+	
+	move.b	PSG_env_form(regZjmp),d0	;	R#13
+	
+	bra	setenv				;
+
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R13 エンベロープ波形
+;	d0.b ... data
+writePSG_13:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_env_form(regZjmp)	;
+
+setenv:
+	;-- エンベロープを使用している、または、リセットされた場合は
+	;   ノートオフしてから発音
+	tst.b	PSG_env_reset(regFtbl)		;
+	bne.s	SKOFE			*  8(10)
+	
+	tst.l	PSG_env_used(regFtbl)		;
+	beq.s	SKKONF				;
+
+
+SKOFE:
+	;-- PSG_env_reset フラグクリア
+	sf	PSG_env_reset(regFtbl)		;
+	
+	
+	;-- OPMレジスタ設定 $08 : Key ON/OFF 制御
+	lea	OPM_Data,a0			;
+	bsr.w	waitOPM				;
+	move.b	#$08,-2(a0)			;
+	
+	;-- チャンネル 5,6,7,8 キーオフ
+	bsr	waitOPM				;
+	move.b	#7,(a0)				;
+	bsr	waitOPM				;
+	move.b	#6,(a0)				;
+	bsr	waitOPM				;
+	move.b	#5,(a0)				;
+	bsr	waitOPM				;
+	move.b	#4,(a0)				;
+	
+	
+	;-- 各チャンネルの ON 設定
+	move.b	PSG_enable(regZjmp),d1		;
+	
+	;-- noise = ch8
+.if SCC_ch8.eq.0
+	tst.l	PSG_noise_ON(regFtbl)		;
+	beq.s	@f				;
+	bsr	waitOPM				;
+	move.b	#%0_1111_111,(a0)		;
+@@:
+.endif
+	;-- chC = ch7
+	ror.b	#3,d1				;
+	add.b	d1,d1				;
+	bcs.s	@f				;
+	bsr	waitOPM				;
+	move.b	#%0_1111_110,(a0)		;
+@@:
+	;-- chB = ch6
+	add.b	d1,d1				;
+	bcs.s	@f				;
+	bsr	waitOPM				;
+	move.b	#%0_1111_101,(a0)		;
+@@:
+	;-- chA = ch5
+	add.b	d1,d1				;
+	bcs.s	@f				;
+	bsr	waitOPM				;
+	move.b	#%0_1111_100,(a0)		;
+@@:
+	
+	
+SKKONF:
+	andi.w	#%0000_1111,d0			;
+	add.w	d0,d0				;
+	move.w	tab_env_form(pc,d0.w),d0	;
+	jmp	tab_env_form(pc,d0.w)		;
+
+
+;-- エンベロープ波形表
+	ENV_0: = set_env_0-tab_env_form
+	ENV_1: = set_env_1-tab_env_form
+	ENV_2: = set_env_2-tab_env_form
+	ENV_3: = set_env_3-tab_env_form
+
+tab_env_form:
+	.dc.w	ENV_1	;  0
+	.dc.w	ENV_1	;  1
+	.dc.w	ENV_1	;  2
+	.dc.w	ENV_1	;  3
+	.dc.w	ENV_2	;  4
+	.dc.w	ENV_2	;  5
+	.dc.w	ENV_2	;  6
+	.dc.w	ENV_2	;  7
+	.dc.w	ENV_0	;  8
+	.dc.w	ENV_1	;  9
+	.dc.w	ENV_0	; 10
+	.dc.w	ENV_0	; 11
+	.dc.w	ENV_0	; 12
+	.dc.w	ENV_3	; 13
+	.dc.w	ENV_0	; 14
+	.dc.w	ENV_2	; 15
+
+
+	;-- エンベロープ 0
+set_env_0:
+	move.b	#31,PSG_env_data(regFtbl)	;
+	move.b	#00,PSG_env_data+1(regFtbl)	;
+	
+	rts					;
+
+
+	;-- エンベロープ 1
+set_env_1:
+	moveq.l	#0,d1				;
+	move.b	PSG_env_cycle(regZjmp),d1	;
+	lsr.w	#3,d1				;
+	
+	move.b	#31,PSG_env_data(regFtbl)	;
+	move.b	T_D2R(pc,d1.w),PSG_env_data+1(regFtbl)	;
+	
+	rts					;
+
+
+	;-- エンベロープ 2
+set_env_2:
+	moveq.l	#0,d1				;
+	move.b	PSG_env_cycle(regZjmp),d1	;
+	lsr.w	#3,d1				;
+	
+	move.b	T_ATR(pc,d1.w),PSG_env_data(regFtbl)	;
+	move.b	#31,PSG_env_data+1(regFtbl)	;
+	
+	rts					;
+
+
+	;-- エンベロープ 3
+set_env_3:
+	moveq.l	#0,d1				;
+	move.b	PSG_env_cycle(regZjmp),d1	;
+	lsr.w	#3,d1				;
+	
+	move.b	T_ATR(pc,d1.w),PSG_env_data(regFtbl)	;
+	move.b	#00,PSG_env_data+1(regFtbl)	;
+	
+	rts					;
+
+
+	*	00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15
+T_ATR:	dc.b	31,10,08,07,06,05,05,04,04,03,03,03,03,02,02,02
+	*	16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+	dc.b	02,02,02,02,02,02,02,02,02,02,02,02,02,02,02,02
+
+	*	00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15
+T_D2R:	dc.b	31,14,12,11,10,10,09,09,08,08,08,08,07,07,07,07
+	*	16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+	dc.b	06,06,06,06,06,06,06,05,05,05,05,05,05,05,05,05
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R14 
+;	d0.b ... data
+writePSG_14:
+
+
+;	trap	#9
+
+
+
+	rts
+
+
+;----------------------------------------------------------------------------------------------
+;-- PSG R15 
+;	d0.b ... data
+writePSG_15:
+
+
+;	trap	#9
+
+
+	move.b	d0,PSG_reg15(regZjmp)		* 
+	
+	;-- LED [カナ]
+	bmi.s	@f				* 10/ 8 (T/F)
+	
+	; 点灯
+	bclr.b	#0,keyboard_LED(regFtbl)	* 16
+	
+	rts					* 16
+	
+@@:	; 消灯
+	bset.b	#0,keyboard_LED(regFtbl)	* 16
+	
+	rts					* 16
+
+
+
+
+
+
+;----------------------------------------------------------------------------------------------
+;	write adr ... d2
+;	data      ... d0
+writeSCC:
+	lea	SCCwork(regFtbl),a0			;
+	andi.w	#$00ff,d2				;
+	move.b	d0,(a0,d2.w)				;
+	
+	cmpi.w	#$80,d2
+	bcs	9f
+	
+
+	lea	OPM_Data,a0
+	
+	;--- ch on/off
+	move.b	SCCwork+$8f(regFtbl),d0			;
+	
+	bsr	waitOPM
+	move.b	#$08,-2(a0)
+	
+	; chE = ch8
+	moveq.l	#%0_1111_111,d1
+	lsl.b	#4,d0
+.if SCC_ch8
+	bcs	@f
+	moveq.l	#%0_0000_111,d1
+@@:	bsr	waitOPM
+	move.b	d1,(a0)
+.endif
+	
+	; cdD = ch4
+	moveq.l	#%0_1111_011,d1
+	add.b	d0,d0
+	bcs	@f
+	moveq.l	#%0_0000_011,d1
+@@:	bsr	waitOPM
+	move.b	d1,(a0)
+	
+	; cdC = ch3
+	moveq.l	#%0_1111_010,d1
+	add.b	d0,d0
+	bcs	@f
+	moveq.l	#%0_0000_010,d1
+@@:	bsr	waitOPM
+	move.b	d1,(a0)
+	
+	; cdB = ch2
+	moveq.l	#%0_1111_001,d1
+	add.b	d0,d0
+	bcs	@f
+	moveq.l	#%0_0000_001,d1
+@@:	bsr	waitOPM
+	move.b	d1,(a0)
+	
+	; cdA = ch1
+	moveq.l	#%0_1111_000,d1
+	add.b	d0,d0
+	bcs	@f
+	moveq.l	#%0_0000_000,d1
+@@:	bsr	waitOPM
+	move.b	d1,(a0)
+	
+	
+	;-- freq
+	; chA = ch1
+	moveq.l	#$20+0,d0
+	move.w	SCCwork+$80(regFtbl),d1
+	ror.w	#8,d1
+	andi.w	#$0fff,d1
+	bsr	setOPMkeycode
+	
+	; chB = ch2
+	moveq.l	#$20+1,d0
+	move.w	SCCwork+$82(regFtbl),d1
+	ror.w	#8,d1
+	andi.w	#$0fff,d1
+	bsr	setOPMkeycode
+	
+	; chC = ch3
+	moveq.l	#$20+2,d0
+	move.w	SCCwork+$84(regFtbl),d1
+	ror.w	#8,d1
+	andi.w	#$0fff,d1
+	bsr	setOPMkeycode
+	
+	; chD = ch4
+	moveq.l	#$20+3,d0
+	move.w	SCCwork+$86(regFtbl),d1
+	ror.w	#8,d1
+	andi.w	#$0fff,d1
+	bsr	setOPMkeycode
+	
+	; chE = ch8
+.if SCC_ch8
+	moveq.l	#$20+7,d0
+	move.w	SCCwork+$88(regFtbl),d1
+	ror.w	#8,d1
+	andi.w	#$0fff,d1
+	bsr	setOPMkeycode
+.endif
+	
+	
+	;--- vol
+	
+	; chA = ch1
+	moveq.l	#$68+0,d0
+	move.b	SCCwork+$8a(regFtbl),d1
+	bsr	setSCCvol
+	
+	; chB = ch2
+	moveq.l	#$68+1,d0
+	move.b	SCCwork+$8b(regFtbl),d1
+	bsr	setSCCvol
+	
+	; chC = ch2
+	moveq.l	#$68+2,d0
+	move.b	SCCwork+$8c(regFtbl),d1
+	bsr	setSCCvol
+	
+	; chD = ch2
+	moveq.l	#$68+3,d0
+	move.b	SCCwork+$8d(regFtbl),d1
+	bsr	setSCCvol
+	
+.if SCC_ch8
+	; chE = ch8
+	moveq.l	#$68+7,d0
+	move.b	SCCwork+$8e(regFtbl),d1
+	bsr	setSCCvol
+.endif
+	
+9:	
+	rts						;
+
+
+setSCCvol:
+	andi.w	#$000f,d1
+	move.b	tab_SCC_vol(pc,d1.w),d1
+	
+	lea	OPM_Address,a0
+	lea	2(a0),a1
+	
+	;-- M2:TL
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	move.b	d1,(a1)				;
+	
+	;-- C1:TL
+	addq.b	#8,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	move.b	d1,(a1)				;
+	
+	;-- C2:TL
+	addq.b	#8,d0				;
+	bsr	waitOPM				;
+	move.b	d0,(a0)				;
+	bsr	waitOPM				;
+	move.b	d1,(a1)				;
+	
+	rts
+
+tab_SCC_vol:
+	.dc.b	PSG_VOL_00,PSG_VOL_01,PSG_VOL_02,PSG_VOL_03
+	.dc.b	PSG_VOL_04,PSG_VOL_05,PSG_VOL_06,PSG_VOL_07
+	.dc.b	PSG_VOL_08,PSG_VOL_09,PSG_VOL_10,PSG_VOL_11
+	.dc.b	PSG_VOL_12,PSG_VOL_13,PSG_VOL_14,PSG_VOL_15
+
+;----------------------------------------------------------------------------------------------
+title:
+	pea.l	msg_title(pc)
+	DOS	__PRINT
+	addq.l	#4,sp
+	
+	rts
+
+msg_title:
+	.dc.b	'PSG/SCC(test) Driver version '
+	VERSION_STRING
+	.dc.b	' based on Ｘ１エミュレータ for X68000',CR,LF,CR,LF,0
+	.even
+
+
+;----------------------------------------------------------------------------------------------
+dummyEntrance:
+	bsr	title
+	
+	clr.w	-(sp)
+	DOS	__EXIT2
+
+
+	.end

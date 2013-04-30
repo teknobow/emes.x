@@ -1,0 +1,63 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+
+VDP_NOP			.equ	0
+
+VDP_TEXT_PATGEN		.equ	$80
+VDP_TEXT1_PATNAME	.equ	$81
+VDP_TEXT2_PATNAME	.equ	$82
+VDP_TEXT2_COLOR		.equ	$83
+
+VDP_MULTI_PATGEN	.equ	$84
+VDP_MULTI_PATNAME	.equ	$85
+
+VDP_GRA1_PATGEN		.equ	$86
+VDP_GRA1_PATNAME	.equ	$87
+VDP_GRA1_COLOR_0	.equ	$88
+VDP_GRA1_COLOR_64	.equ	$a7		* !!
+VDP_GRA1_COLOR_128	.equ	$a8		* !!
+VDP_GRA1_COLOR_192	.equ	$a9		* !!
+
+
+VDP_GRA23_PATGEN_B1	.equ	$89
+VDP_GRA23_PATGEN_B2	.equ	$8a
+VDP_GRA23_PATGEN_B3	.equ	$8b
+VDP_GRA23_PATGEN_B4	.equ	$8c
+VDP_GRA23_COLOR_B1	.equ	$8d
+VDP_GRA23_COLOR_B2	.equ	$8e
+VDP_GRA23_COLOR_B3	.equ	$8f
+VDP_GRA23_COLOR_B4	.equ	$90
+VDP_GRA23_PATNAME_B1	.equ	$91
+VDP_GRA23_PATNAME_B2	.equ	$92
+VDP_GRA23_PATNAME_B3	.equ	$93
+VDP_GRA23_PATNAME_B4	.equ	$94
+
+VDP_GRA4_PATNAME_P0	.equ	$95
+VDP_GRA4_PATNAME_P1	.equ	$96
+VDP_GRA4_PATNAME_P2	.equ	$97
+VDP_GRA4_PATNAME_P3	.equ	$98
+
+VDP_GRA5_PATNAME_P0	.equ	$99
+VDP_GRA5_PATNAME_P1	.equ	$9a
+VDP_GRA5_PATNAME_P2	.equ	$9b
+VDP_GRA5_PATNAME_P3	.equ	$9c
+
+VDP_GRA6_PATNAME_P0	.equ	$9d
+VDP_GRA6_PATNAME_P1	.equ	$9e
+
+VDP_GRA7_PATNAME_P0	.equ	$9f
+VDP_GRA7_PATNAME_P1	.equ	$a0
+
+VDP_SP1_ATTR_U		.equ	$a1
+VDP_SP1_ATTR_B		.equ	$a2
+VDP_SP1_PATGEN		.equ	$a3
+
+VDP_SP2_ATTR		.equ	$a4
+VDP_SP2_PATGEN		.equ	$a5
+VDP_SP2_COLOR		.equ	$a6
+

@@ -1,0 +1,15 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+PROC_OUT	.equ -128
+PROC_SREG	.equ -28
+PROC_IN		.equ 2
+PROC_VDPREG	.equ 36
+
+
+
+;;;DEBUG_PSG .equ 1

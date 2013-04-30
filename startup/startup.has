@@ -1,0 +1,4824 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+;
+; Startup Routine
+;
+
+
+	.include doscall.mac
+	.include iocscall.mac
+
+	.include version.equ
+	.include ../Z80/z80emu.equ
+	.if MPU.eq.68000
+		.include ../work/000/z80emusize.equ
+	.else
+		.fail 1
+	.endif
+	.include ../IO/slot.equ
+	.include ../IO/x68k.equ
+
+	.xdef	exitMSXemu,errExitMSXemu
+	.xdef	FlagDebuggerON,FlagBreakPoint,BreakPoint
+	.xdef	Zjmp,Z80mem
+	
+	.xref	Z80exec,_Zjmp,Ftbl,_VRAM
+	.xref	_SlotTablePage0,_SlotTablePage1,_SlotTablePage2,_SlotTablePage3
+	.xref	_SegmentsMemMap,_MemoryMapperTbl,_IndexMemoryMapper
+	.xref	_PSG_ProcTable
+	.xref	_noKeyInt
+	.xref	_keyboard_LED
+	.xref	_CountVDISP,_CountUpdate,_cnt_CountVDISP,_cnt_CountUpdate
+	.xref	tableSCRrel
+	.xref	_driverSpace
+	.xref	RelAdr_ExtSlot
+	.xref	_Org_KeyInterrupt,_Org_NMIintr,_Org_COPYintr
+
+	.xref	create_PCGtable
+
+
+
+CR	.equ	$0d
+LF	.equ	$0a
+TAB	.equ	$09
+EOF	.equ	$1a
+
+
+;-- ドライバファイル名の長さ
+SZ_DRVFNAME:	.equ	128
+
+
+DEBUG_MSG	.macro	chr
+.ifdef	DEBUG
+	move.w	#chr,-(sp)
+	DOS	__PUTCHAR
+	addq.l	#2,sp
+.endif
+.endm
+
+
+	.text
+	.even
+
+
+*----------------------------------------------------------------------------------------------
+* a0 ... プログラムのメモリ管理ポインタのアドレス
+* a1 ... プログラム(DATA, BSS含む)の終わり+1のアドレス
+* a2 ... プログラムに渡されたコマンドラインのアドレス
+* a3 ... 環境のアドレス
+* a4 ... プログラムの実行先頭アドレス
+Entrance:
+	
+	*-- プログラム情報の保存
+	move.l	a0,(MemPointer)
+	move.l	a1,(ProgramEndAdr)
+	move.l	a2,(CommandLineAdr)
+	move.l	a3,(EnvAdr)
+	move.l	a4,(ProgramStartAdr)
+	move.l	8(a0),(EndMemoryBlockAdr)
+	
+	*-- スタックの設定
+	lea	Ftbl,sp
+	
+	*-- タイトル表示
+	bsr	title
+	
+	*-- コマンドラインの処理
+	bsr	procCommandLine
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- コンフィグファイルの処理
+	bsr	procConfigFile
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- メモリアロケーション情報の初期化
+	bsr	initAlloc
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- Z80用メモリの確保
+	bsr	allocZ80mem
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- VRAMの確保
+	bsr	allocVRAM
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- Z80エミュレータのリロケート
+	bsr	relocateZ80emu
+	
+	;-- ドライバ読み込み
+	bsr	loadDriver
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- スロット管理テーブルの初期化
+	bsr	initSlotTable
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	*-- 未使用メモリの解放
+	bsr	freeUnuseMemory
+	
+	
+	
+	*-- 初期化
+	bsr	initX68k
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	
+	;-- PCGﾃｰﾌﾞﾙ作成
+	bsr	create_PCGtable
+	tst.l	d0
+	bne	errExitMSXemu
+	
+	
+	*-- Z80 エミュレート開始
+	jmp	Z80exec
+	
+	
+	
+*-- 正常終了
+exitMSXemu:
+	;-- VDISP 割り込み解除
+	suba.l	a1,a1					*  8
+	moveq.l	#$6c,d0					*  4
+	trap	#15					* 	IOCS	_VDISPST				* 
+	
+	
+	;-- RASTER 割り込み解除
+	suba.l	a1,a1					*  8
+	moveq.l	#$6d,d0					*  4
+	trap	#15					* 	IOCS	_CRTCRAS
+	
+	
+	;-- キーボード割り込み解除
+	move.l	(_Org_KeyInterrupt),d0
+	beq	@f
+	move.l	d0,-(sp)
+	move.w	#VECTOR_KEYINT,-(sp)		* 
+	DOS	__INTVCS
+	addq.w	#6,sp
+@@:	
+	
+	*-- インタラプトスイッチ処理の登録
+	move.l	(_Org_NMIintr),d0
+	beq	@f
+	move.l	d0,-(sp)
+	move.w	#VECTOR_NMI,-(sp)
+	DOS	__INTVCS
+	addq.w	#6,sp
+@@:
+	
+	
+	*-- コピーキーの処理
+	move.l	(_Org_COPYintr),d0
+	beq	@f
+	move.l	d0,-(sp)
+	move.w	#VECTOR_COPYINT,-(sp)
+	DOS	__INTVCS
+	addq.w	#6,sp
+@@:
+	
+	;-- OPM キーオフ
+	lea	OPM_Address,a0			;
+	lea	2(a0),a1			;	OPM_Data
+	move.w	#7,d0
+1:
+@@:	nop
+	tst.b	(a1)
+	bmi.s	@b
+	move.b	#$08,(a0)
+@@:	nop
+	tst.b	(a1)
+	bmi.s	@b
+	move.b	d0,(a1)
+	dbra	d0,1b
+	
+	
+	;-- G-RAM 使用状況設定
+	moveq.l	#0,d1			* GRAPHIC
+	moveq.l	#0,d2			* 
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+	
+	;-- T-RAM 使用状況設定
+	moveq.l	#1,d1			* TEXT
+	moveq.l	#0,d2			* 
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+	
+	;-- 画面モード設定
+	move.w	#0,-(sp)		; 768x512
+	move.w	#16,-(sp)
+	DOS	__CONCTRL
+	addq.w	#4,sp
+	
+	;-- 
+	clr.w	-(sp)
+	DOS	__EXIT2
+
+
+
+*-- 異常終了
+errExitMSXemu:
+	
+	
+	move.w	#1,-(sp)
+	DOS	__EXIT2
+
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* タイトル表示
+
+title:
+	lea.l	str_title(pc),a0
+	bsr	printString
+	
+	rts
+
+
+str_title:
+	dc.b	'MSX Emulator for X680x0 version '
+	VERSION_STRING
+	.dc.b	CR,LF
+	dc.b	'Copyright 1997-1998 nir',CR,LF,CR,LF,0
+
+	.even
+
+
+*----------------------------------------------------------------------------------------------
+* 文字列の表示
+*
+*  IN:	a0.l ... 文字列
+
+printString:
+	move.l	a0,-(sp)
+	DOS	__PRINT
+	addq.l	#4,sp
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* Z80用メモリを 64K 境界から始まるアドレスから確保
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+*	+--------+
+*	|保護領域| (64Kﾊﾞｲﾄ)
+*	+--------+
+*	| メモリ | (64Kﾊﾞｲﾄ)
+*	+--------+
+*	|保護領域| (64Kﾊﾞｲﾄ)
+*	+--------+
+
+allocZ80mem:
+	
+	*-- 保護領域
+	move.l	#64*1024,d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	allocZ80mem_err_mem	* not enough memory
+	
+	movea.l	d0,a0
+	move.l	#$76767676,d0		* HALT
+	move.w	#64*1024/4-1,d1		* loop counter
+@@:
+	move.l	d0,(a0)+
+	dbra	d1,@b
+	
+	
+	*-- Z80メモリ空間
+	move.l	#64*1024,d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	allocZ80mem_err_mem	* not enough memory
+	
+	move.l	d0,(Z80mem)
+	
+	
+	*-- 保護領域
+	move.l	#64*1024,d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	allocZ80mem_err_mem	* not enough memory
+	
+	movea.l	d0,a0
+	move.l	#$76767676,d0		* HALT
+	move.w	#64*1024/4-1,d1		* loop counter
+@@:
+	move.l	d0,(a0)+
+	dbra	d1,@b
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- メモリ不足
+allocZ80mem_err_mem:
+	lea	emsg_notEnoughMem,a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* VRAMを 128K 境界のアドレスから確保
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+
+allocVRAM:
+	
+	*-- 確保されるメモリを 128K 境界に設定
+	move.l	(TopAllocMemory),d0	* 空きメモリの先頭アドレス
+	btst.l	#16,d0
+	beq	@f
+	
+	move.l	#64*1024,d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	allocVRAM_err_mem	* not enough memory
+@@:
+	*-- メモリ確保 (128KB)
+	move.l	#128*1024,d0		* size
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	allocVRAM_err_mem	* not enough memory
+	
+	move.l	d0,(_VRAM)
+	
+	
+	;-- VRAM をクリアする
+	movea.l	d0,a0
+	moveq.l	#0,d0
+	move.w	#128*1024/4,d1
+@@:
+	move.l	d0,(a0)+
+	dbra	d1,@b
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- メモリ不足エラー
+allocVRAM_err_mem:
+	lea	emsg_notEnoughMem,a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* Z80エミュレータのリロケート
+* Z80エミュレート用コードを、下位ワードが $0100 から始まるアドレスにリロケートする
+
+relocateZ80emu:
+	
+	*-- Z80エミュレート用コード位置のチェック
+	lea	_Zjmp,a0
+	move.l	a0,d0
+	cmpi.w	#$0100,d0
+	bne	@f
+	
+	move.l	d0,(Zjmp)
+	
+	bra	relocateZ80emuWork
+	
+@@:	
+	*-- リロケート先アドレス算出
+	move.l	d0,d1
+	move.w	#$0100,d1
+	
+	cmp.l	d1,d0
+	bcs	@f
+	addi.l	#$10000,d1
+@@:
+	
+	*-- Z80エミュレートエントリー設定
+	move.l	d1,(Zjmp)
+	
+	;-- ワークリロケート用
+	move.l	d1,d2
+	sub.l	d0,d2
+	move.l	d2,(Zjmp_offset)
+	
+	*-- リロケート
+	movea.l	d0,a0
+	adda.l	#SIZE_Z80emu-SIZE_Zjmp,a0
+	movea.l	d1,a1
+	adda.l	#SIZE_Z80emu-SIZE_Zjmp,a1
+	
+	move.l	#SIZE_Z80emu/2,d2
+@@:
+	move.w	-(a0),-(a1)
+	subq.l	#1,d2
+	bne	@b
+	
+	
+	
+;-- 
+relocateZ80emuWork:
+	lea	tableSCRrel,a0
+	move.l	(Zjmp_offset),d0
+@@:
+	move.l	(a0)+,d1
+	beq	@f
+	movea.l	d1,a1
+	add.l	d0,(a1)
+	bra	@b
+@@:
+	
+	bsr	flushCache
+	
+	rts
+
+
+
+;-------------------------------------
+flushCache:
+	*-- キャッシュのフラッシュ
+	lea	$0cbc,a1
+	IOCS	__B_BPEEK
+	tst.b	d0
+	beq	@f
+	moveq.l	#3,d1
+	moveq.l	#3,d2
+	moveq.l	#$ac,d0
+	trap	#15
+@@:
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* スロット管理テーブルの初期化
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+
+
+	.offset 0
+O_PAGE_TYPE:
+	.ds.b	1
+O_ROM_TYPE:
+O_WORK1:
+	.ds.b	1
+O_SEGMENT:
+O_WORK2:
+	.ds.b	1
+O_WORK3:
+	.ds.b	1
+O_WORK4:
+O_FILENAME:
+SZ_FILENAME	.equ	128
+	.ds.b	SZ_FILENAME
+O_PATFNAME:
+SZ_PATFNAME	.equ	128
+	.ds.b	SZ_PATFNAME
+SZ_SLOT_INFO:
+
+	.text
+
+
+PAGE_TYPE_NULL		.equ	0
+PAGE_TYPE_RAM		.equ	1
+PAGE_TYPE_ROM		.equ	2
+PAGE_TYPE_MAPPER	.equ	3
+PAGE_TYPE_MEGAROM	.equ	4
+
+
+
+*---
+initSlotTable:
+	*-- マップされていないページ用
+	clr.l	(unmappedPage)
+	
+	*-- スロット設定情報テーブル
+	lea	slotInfoTable,a6
+	
+	*-- 基本スロット番号
+	moveq.l	#0,d5
+	
+	*-- 拡張スロット番号
+	moveq.l	#0,d6
+	
+	
+initSlotTable_loop:
+	
+	*-- ページ０:ページ番号
+	moveq.l	#0,d4
+	
+	*-- ページ０:スロット管理テーブル設定
+	lea	_SlotTablePage0,a0
+	bsr	setSlotTable
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- ページ０:情報表示
+	bsr	printSlotInfo
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- 次のスロット設定情報テーブル
+	lea	SZ_SLOT_INFO(a6),a6
+	
+	
+	*-- ページ１
+	moveq.l	#1,d4
+	
+	*-- ページ１:スロット管理テーブル設定
+	lea	_SlotTablePage1,a0
+	bsr	setSlotTable
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- ページ１:情報表示
+	bsr	printSlotInfo
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- 次のスロット設定情報テーブル
+	lea	SZ_SLOT_INFO(a6),a6
+	
+	
+	*-- ページ２:ページ番号
+	moveq.l	#2,d4
+	
+	*-- ページ２:スロット管理テーブル設定
+	lea	_SlotTablePage2,a0
+	moveq.l	#2,d4
+	bsr	setSlotTable
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- ページ２:情報表示
+	bsr	printSlotInfo
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- 次のスロット設定情報テーブル
+	lea	SZ_SLOT_INFO(a6),a6
+	
+	
+	*-- ページ３:ページ番号
+	moveq.l	#3,d4
+	
+	*-- ページ３:スロット管理テーブル設定
+	lea	_SlotTablePage3,a0
+	moveq.l	#3,d4
+	bsr	setSlotTable
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- ページ３:情報表示
+	bsr	printSlotInfo
+	tst.l	d0
+	bne	initSlotTable_err
+	
+	*-- 次のスロット設定情報テーブル
+	lea	SZ_SLOT_INFO(a6),a6
+	
+	
+	*-- 拡張スロット番号インクリメント
+	addq.w	#1,d6
+	cmpi.w	#4,d6
+	bne	initSlotTable_loop
+	
+	*-- 基本スロット番号インクリメント
+	moveq.l	#0,d6
+	addq.w	#1,d5
+	cmpi.w	#4,d5
+	bne	initSlotTable_loop
+	
+	
+	*-- -V の時は改行しキー入力待ち
+	tst.b	(verboseMode)
+	beq	@f
+	lea	prSlotInfo_str_pause(pc),a0
+	bsr	printString
+	
+	move.w	#$08,-(sp)		* GETC
+	.dc.w	$ff0c			* DOS KFLUSH
+	addq.w	#2,sp
+	
+@@:
+	
+	*-- リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+initSlotTable_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+prSlotInfo_str_pause:
+	.dc.b	CR,LF,'Hit any key.',CR,LF,0
+	.even
+
+*----------------------------------------------------------------------------------------------
+* スロット設定情報をスロット管理テーブルに設定する
+*  IN:	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+*
+* OUT:	d0.l ... 0:正常  !0:エラー
+
+setSlotTable:
+	
+	*-- 設定スロットのオフセットの計算
+	move.w	d5,d1	* 基本スロット番号
+	lsl.w	#2,d1
+	add.w	d6,d1	* 拡張スロット番号
+	mulu.w	#16,d1
+	
+	
+	*-- ページのタイプに設定
+	move.b	O_PAGE_TYPE(a6),d0
+	
+	cmpi.b	#PAGE_TYPE_NULL,d0
+	beq	setSlotInfo_NULL
+	
+	cmpi.b	#PAGE_TYPE_RAM,d0
+	beq	setSlotInfo_RAM
+	
+	cmpi.b	#PAGE_TYPE_ROM,d0
+	beq	setSlotInfo_ROM
+	
+	cmpi.b	#PAGE_TYPE_MAPPER,d0
+	beq	setSlotInfo_MAPPER
+	
+	cmpi.b	#PAGE_TYPE_MEGAROM,d0
+	beq	setSlotInfo_MEGAROM
+	
+	*-- 内部エラー
+	lea	emsg_internal,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+;----------------------------
+getUnmappedPage:
+	move.l	(unmappedPage),d0
+	bne	@f
+	
+	move.l	#16*1024,d0
+	bsr	memoryAlloc
+	
+	move.l	d0,(unmappedPage)
+@@:
+	rts
+
+
+
+*-- ページタイプ NULL の設定
+*  IN:	d1.w ... スロット管理テーブルのオフセット
+*	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+
+setSlotInfo_NULL:
+	;-- 未実装メモリ領域獲得 (d0.l)
+	bsr	getUnmappedPage
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	*-- 領域全て HALT に設定
+	movea.l	d0,a1
+	move.l	#$76767676,d2		* HALT
+	move.w	#16*1024/4-1,d3		* loop counter
+1:
+	move.l	d2,(a1)+
+	dbra	d3,1b
+	
+@@:
+	*-- アドレス設定
+	lea	(a0,d1.w),a1
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.l	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	*-- ページタイプを VOID に設定
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+0(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+1(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+2(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+3(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+4(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+5(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+6(a1)
+	move.b	#MEMTYPE_VOID/256,SLOTINFO_MEMTYPE+7(a1)
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- ページタイプ RAM の設定
+*  IN:	d1.w ... スロット管理テーブルの先頭からのオフセット
+*	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+
+setSlotInfo_RAM:
+	
+	*-- RAM 領域を確保
+	move.l	#16*1024,d0		* size
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	;-- メモリアドレス
+	movea.l	d0,a1
+	
+	;-- 設定スロットの管理テーブル
+	lea	(a0,d1.w),a2
+	
+	*-- スロット管理テーブルのメモリアドレス設定
+	move.l	d0,SLOTINFO_MEMADR_Low(a2)
+	addi.l	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a2)
+	
+	*-- スロット管理テーブルのページタイプを RAM に設定
+	clr.b	SLOTINFO_MEMTYPE+0(a2)
+	clr.b	SLOTINFO_MEMTYPE+1(a2)
+	clr.b	SLOTINFO_MEMTYPE+2(a2)
+	clr.b	SLOTINFO_MEMTYPE+3(a2)
+	clr.b	SLOTINFO_MEMTYPE+4(a2)
+	clr.b	SLOTINFO_MEMTYPE+5(a2)
+	clr.b	SLOTINFO_MEMTYPE+6(a2)
+	clr.b	SLOTINFO_MEMTYPE+7(a2)
+	
+	
+	*-- RAM 領域は全て HALT に設定
+	move.l	#$76767676,d0		* HALT
+	move.w	#16*1024/4-1,d1		* loop counter
+@@:
+	move.l	d0,(a1)+
+	dbra	d1,@b
+	
+	
+	*-- 正常終了
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- ページタイプ ROM の設定
+*  IN:	d1.w ... スロット管理テーブルの先頭からのオフセット
+*	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+
+setSlotInfo_ROM:
+	
+	*-- ROM 格納領域を確保
+	move.l	#16*1024,d0		* size
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	*-- スロット管理テーブルのメモリアドレス設定
+	lea	(a0,d1.w),a1
+	move.l	d0,SLOTINFO_MEMADR_Low(a1)
+	addi.l	#$2000,d0
+	move.l	d0,SLOTINFO_MEMADR_High(a1)
+	
+	*-- スロット管理テーブルのページタイプを ROM に設定
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+0(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+1(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+2(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+3(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+4(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+5(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+6(a1)
+	move.b	#ROMTYPE_NORM/256,SLOTINFO_MEMTYPE+7(a1)
+	
+	*-- ROM ファイルのオープン
+	clr.w	-(sp)			* 読み込みモード
+	pea.l	O_FILENAME(a6)		* ファイル名
+	DOS	__OPEN
+	addq.l	#6,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_ROM_err_open
+	
+	*-- ファイルハンドル保存
+	move.w	d0,(fileHandle_ROM)
+	
+	*-- ファイルサイズのチェック
+	move.w	#2,-(sp)		* ファイルエンドからのオフセット
+	clr.l	-(sp)			* オフセット
+	move.w	(fileHandle_ROM),-(sp)	* ファイルハンドル
+	DOS	__SEEK
+	addq.l	#8,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_ROM_err_read
+	
+	*-- ファイルサイズが 16KB でなかったらエラー
+	cmpi.l	#16*1024,d0
+	bne	setSlotInfo_ROM_err_size
+	
+	*-- ファイルの先頭へシーク
+	clr.w	-(sp)			* 先頭からのオフセット
+	clr.l	-(sp)			* オフセット
+	move.w	(fileHandle_ROM),-(sp)	* ファイルハンドル
+	DOS	__SEEK
+	addq.l	#8,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_ROM_err_read
+	
+	
+	*-- ファイル読み込み
+	move.l	#16*1024,-(sp)				* 読み込みサイズ
+	move.l	SLOTINFO_MEMADR_Low(a0,d1.w),-(sp)	* 読み込みバッファ
+	move.w	(fileHandle_ROM),-(sp)			* ファイルハンドル
+	DOS	__READ
+	lea	10(sp),sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_ROM_err_read
+	
+	cmpi.l	#16*1024,d0
+	bne	setSlotInfo_ROM_err_size
+	
+	*-- ファイルのクローズ
+	move.w	(fileHandle_ROM),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	
+	;-- パッチ処理
+	tst.b	O_PATFNAME(a6)
+	beq	@f
+	
+	lea	O_PATFNAME(a6),a3
+	movea.l	SLOTINFO_MEMADR_Low(a0,d1.w),a4
+	bsr	procPatchFile
+	tst.l	d0
+	beq	@f
+	
+	moveq.l	#-1,d0
+	
+	rts
+	
+@@:
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- オープンできない
+setSlotInfo_ROM_err_open:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	emsg_setSlotInfo_ROM_open(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+*-- ファイルサイズが不正
+setSlotInfo_ROM_err_size:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	emsg_setSlotInfo_ROM_size(pc),a0
+	bsr	printString
+	
+	*-- ファイルのクローズ
+	move.w	(fileHandle_ROM),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+*-- 読み込みでエラー
+setSlotInfo_ROM_err_read:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	emsg_setSlotInfo_ROM_read(pc),a0
+	bsr	printString
+	
+	*-- ファイルのクローズ
+	move.w	(fileHandle_ROM),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+emsg_setSlotInfo_ROM_open:
+	.dc.b	': ファイルがオープンできません。',CR,LF,0
+
+emsg_setSlotInfo_ROM_size:
+	.dc.b	': ファイルのサイズが不正です。',CR,LF,0
+
+emsg_setSlotInfo_ROM_read:
+	.dc.b	': ファイルが読めません。',CR,LF,0
+
+	.even
+
+fileHandle_ROM:	.dc.w	0
+
+
+
+*-- ページタイプ MAPPER の設定
+*  IN:	d1.w ... スロット管理テーブルの先頭からのオフセット
+*	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+	
+setSlotInfo_MAPPER:
+	
+	*-- メモリマッパーは４ページなので、０ページの設定で呼ばれた時のみ設定する
+	tst.w	d4
+	bne	setSlotInfo_ret
+	
+	
+	*-- スロット管理テーブルのメモリマッパスロットのオフセットを設定
+	move.w	d1,(_IndexMemoryMapper)
+	
+	*-- セグメント数を取得
+	move.w	O_SEGMENT(a6),d1
+	
+	*-- セグメント数設定
+	move.w	d1,(_SegmentsMemMap)
+	
+	*-- メモリマッパー管理テーブル
+	lea	_MemoryMapperTbl,a0
+	
+	moveq.l	#0,d2
+@@:
+	*-- セグメント確保
+	move.l	#16*1024,d0		* size
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	*-- アドレス設定
+	ext.w	d2
+	lsl.w	#2,d2
+	move.l	d0,(a0,d2.w)
+	lsr.w	#2,d2
+	addq.b	#1,d2
+	
+	*-- 全てのセグメントの割り当てが済むまでループ
+	subq.w	#1,d1
+	bne	@b
+	
+	
+setSlotInfo_ret:
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+
+*-- メモリ不足エラー
+setSlotInfo_err_mem:
+	lea	emsg_notEnoughMem,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*-- ページタイプ MEGAROM の設定
+*  IN:	d1.w ... スロット管理テーブルの先頭からのオフセット
+*	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a0.l ... スロット管理テーブルへのポインタ
+*	a6.l ... スロット設定情報テーブルへのポインタ
+
+setSlotInfo_MEGAROM:
+	;-- ページ１か？
+	cmpi.w	#1,d4
+	beq	setSlotInfo_MEGAROM_p1
+	
+	;-- ページ２か？
+	cmpi.w	#2,d4
+	beq	@f
+	
+	*-- 内部エラー
+	lea	emsg_internal,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+@@:
+	moveq.l	#0,d0
+	rts
+
+
+;---
+setSlotInfo_MEGAROM_p1:
+	;-- MEGAROM ファイルのオープン
+	clr.w	-(sp)			* 読み込みモード
+	pea.l	O_FILENAME(a6)		* ファイル名
+	DOS	__OPEN
+	addq.l	#6,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_MEGAROM_err_open
+	
+	;-- ファイルハンドル保存
+	move.w	d0,(fileHandle_ROM)
+	
+	;-- ファイルサイズのチェック
+	move.w	#2,-(sp)		* ファイルエンドからのオフセット
+	clr.l	-(sp)			* オフセット
+	move.w	(fileHandle_ROM),-(sp)	* ファイルハンドル
+	DOS	__SEEK
+	addq.l	#8,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_MEGAROM_err_read
+	
+	move.l	d0,(workMEGAROM_size)
+	
+	;-- セグメント数(8K単位)のチェック
+	divu.w	#$2000,d0
+	cmpi.w	#256,d0
+	bcc	setSlotInfo_MEGAROM_err_size
+	cmpi.w	#4,d0
+	bcs	setSlotInfo_MEGAROM_err_size
+	
+	;-- セグメント数設定
+	move.w	d0,(workMEGAROM_segments)
+	
+	;-- ファイルサイズが 8KB の倍数でなかったらエラー
+	swap.w	d0
+	tst.w	d0
+	bne	setSlotInfo_MEGAROM_err_size
+	
+	;-- メガロム読み込み領域確保
+	move.l	(workMEGAROM_size),d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	move.l	d0,(workMEGAROM_adr)
+	
+	
+	;-- ファイルの先頭へシーク
+	clr.w	-(sp)			* 先頭からのオフセット
+	clr.l	-(sp)			* オフセット
+	move.w	(fileHandle_ROM),-(sp)	* ファイルハンドル
+	DOS	__SEEK
+	addq.l	#8,sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_MEGAROM_err_read
+	
+	;-- ファイル読み込み
+	move.l	(workMEGAROM_size),-(sp)		* 読み込みサイズ
+	move.l	(workMEGAROM_adr),-(sp)			* 読み込みバッファ
+	move.w	(fileHandle_ROM),-(sp)			* ファイルハンドル
+	DOS	__READ
+	lea	10(sp),sp
+	
+	tst.l	d0
+	bmi	setSlotInfo_MEGAROM_err_read
+	
+	cmp.l	(workMEGAROM_size),d0
+	bne	setSlotInfo_MEGAROM_err_size
+	
+	;-- ファイルのクローズ
+	move.w	(fileHandle_ROM),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	;-- メガロム管理テーブル確保
+	bsr	allocMEGAROMtable
+	tst.l	d0
+	beq	setSlotInfo_err_mem
+	
+	move.l	d0,(workMEGAROM_tbl)
+	
+	;-- メガロム管理テーブル設定
+	movea.l	d0,a1				; メガロム管理テーブル
+	movea.l	(workMEGAROM_adr),a2		; メガロム読み込み領域
+	move.w	(workMEGAROM_segments),d2	; セグメント数
+	subq.w	#1,d2				; d2.w ループカウンタ
+	moveq.l	#0,d3				; テーブル位置
+@@:
+	move.b	d3,d0
+	ext.w	d0
+	add.w	d0,d0
+	add.w	d0,d0
+	move.l	a2,(a1,d0.w)
+	addq.w	#1,d3
+	lea	$2000(a2),a2
+	dbra	d2,@b
+	
+	;--- メガロムタイプ設定
+	movea.l	(workMEGAROM_adr),a1
+	
+	move.b	(a1),d0
+	subi.b	#'A',d0
+	cmpi.b	#7,d0
+	bcc	setSlotInfo_MEGAROM_err_header
+	
+	ext.w	d0
+	move.w	d0,(workMEGAROM_type)
+	
+	;-- ヘッダチェック
+	move.b	#'A',(a1)+
+	
+	cmpi.b	#'B',(a1)
+	bne	setSlotInfo_MEGAROM_err_header
+	
+	;-- スロット情報テーブル設定
+	lea	SZ_SLOT_INFO(a6),a1	; ページ２のスロット情報テーブル
+	
+	; メガロムの種類
+	move.w	(workMEGAROM_type),d0
+	move.b	d0,O_ROM_TYPE(a6)	; Page 1
+	move.b	d0,O_ROM_TYPE(a1)	; Page 2
+	
+	; セグメント数
+	move.w	(workMEGAROM_segments),O_SEGMENT(a6)	; Page 1
+	move.w	(workMEGAROM_segments),O_SEGMENT(a1)	; Page 2
+	
+	
+	;-- スロット管理テーブル設定
+	lea	(a0,d1.w),a1		; Page 1
+	
+	lea	_SlotTablePage2,a2
+	lea	(a2,d1.w),a2		; Page 2
+	
+	movea.l	(workMEGAROM_tbl),a3
+	
+	; メモリアドレス
+	move.l	(a3),SLOTINFO_MEMADR_Low(a1)	; Page 1 L
+	move.l	(a3),SLOTINFO_MEMADR_High(a1)	; Page 1 H
+	move.l	(a3),SLOTINFO_MEMADR_Low(a2)	; Page 2 L
+	move.l	(a3),SLOTINFO_MEMADR_High(a2)	; Page 2 H
+	
+	; 選択セグメント
+	clr.b	SLOTINFO_SEGMENT_Low(a1)	; 選択セグメント番号 (L)
+	clr.b	SLOTINFO_SEGMENT_High(a1)	; 選択セグメント番号 (H)
+	clr.b	SLOTINFO_SEGMENT_Low(a2)	; 選択セグメント番号 (L)
+	clr.b	SLOTINFO_SEGMENT_High(a2)	; 選択セグメント番号 (H)
+	
+	; メガロム管理テーブル
+	move.l	a3,SLOTINFO_MEGAROM_TBL(a1)
+	move.l	a3,SLOTINFO_MEGAROM_TBL(a2)
+	
+	
+	; ロムタイプ
+	move.w	(workMEGAROM_type),d0
+	lsl.w	#4,d0			; d0 *= 16
+	lea	MEGAROM_memmark(pc,d0.w),a3
+	move.l	(a3)+,SLOTINFO_MEMTYPE+0(a1)
+	move.l	(a3)+,SLOTINFO_MEMTYPE+4(a1)
+	move.l	(a3)+,SLOTINFO_MEMTYPE+0(a2)
+	move.l	(a3)+,SLOTINFO_MEMTYPE+4(a2)
+	
+	
+	;--
+	moveq.l	#0,d0
+	
+	rts
+
+
+
+;--------------
+MEGAROM_memmark:
+	; 0 : KONAMI (with SCC)
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ChangeMegaROM_Page1Low/256	; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ROMTYPE_NORM/256		; $6000 - $67ff
+	.dc.b	ROMTYPE_NORM/256		; $6800 - $6fff
+	.dc.b	ChangeMegaROM_Page1High/256	; $7000 - $77ff
+	.dc.b	ROMTYPE_NORM/256		; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ChangeMegaROM_Page2Low_wP2/256	; $9000 - $97ff
+	.dc.b	OutputSCC/256			; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ChangeMegaROM_Page2High_wP2/256	; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+	
+	
+	; 1 : ASCII (8K)
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ROMTYPE_NORM/256		; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ChangeMegaROM_Page1Low/256	; $6000 - $67ff
+	.dc.b	ChangeMegaROM_Page1High/256	; $6800 - $6fff
+	.dc.b	ChangeMegaROM_Page2Low_wP1/256	; $7000 - $77ff
+	.dc.b	ChangeMegaROM_Page2High_wP1/256	; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ROMTYPE_NORM/256		; $9000 - $97ff
+	.dc.b	ROMTYPE_NORM/256		; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ROMTYPE_NORM/256		; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+	
+	
+	; 2 : ASCII (16K)
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ROMTYPE_NORM/256		; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ChangeMegaROM_Page1/256		; $6000 - $67ff
+	.dc.b	ChangeMegaROM_Page1/256		; $6800 - $6fff
+	.dc.b	ChangeMegaROM_Page2/256		; $7000 - $77ff
+	.dc.b	ChangeMegaROM_Page2/256		; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ROMTYPE_NORM/256		; $9000 - $97ff
+	.dc.b	ROMTYPE_NORM/256		; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ROMTYPE_NORM/256		; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+	
+	
+	; 3 : Panasonic
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ROMTYPE_NORM/256		; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ROMTYPE_NORM/256		; $6000 - $67ff
+	.dc.b	ROMTYPE_NORM/256		; $6800 - $6fff
+	.dc.b	ROMTYPE_NORM/256		; $7000 - $77ff
+	.dc.b	ROMTYPE_NORM/256		; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ROMTYPE_NORM/256		; $9000 - $97ff
+	.dc.b	ROMTYPE_NORM/256		; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ROMTYPE_NORM/256		; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+	
+	
+	; 4 : KONAMI
+	.dc.b	ChangeMegaROM_Page1Low/256	; $4000 - $47ff
+	.dc.b	ChangeMegaROM_Page1Low/256	; $4800 - $4fff
+	.dc.b	ChangeMegaROM_Page1Low/256	; $5000 - $57ff
+	.dc.b	ChangeMegaROM_Page1Low/256	; $5800 - $5fff
+	.dc.b	ChangeMegaROM_Page1High/256	; $6000 - $67ff
+	.dc.b	ChangeMegaROM_Page1High/256	; $6800 - $6fff
+	.dc.b	ChangeMegaROM_Page1High/256	; $7000 - $77ff
+	.dc.b	ChangeMegaROM_Page1High/256	; $7800 - $7fff
+	
+	.dc.b	ChangeMegaROM_Page2Low_wP2/256	; $8000 - $87ff
+	.dc.b	ChangeMegaROM_Page2Low_wP2/256	; $8800 - $8fff
+	.dc.b	ChangeMegaROM_Page2Low_wP2/256	; $9000 - $97ff
+	.dc.b	ChangeMegaROM_Page2Low_wP2/256	; $9800 - $9fff
+	.dc.b	ChangeMegaROM_Page2High_wP2/256	; $a000 - $a7ff
+	.dc.b	ChangeMegaROM_Page2High_wP2/256	; $a800 - $afff
+	.dc.b	ChangeMegaROM_Page2High_wP2/256	; $b000 - $b7ff
+	.dc.b	ChangeMegaROM_Page2High_wP2/256	; $b800 - $bfff
+	
+	
+	; 5 : R-TYPE
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ROMTYPE_NORM/256		; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ROMTYPE_NORM/256		; $6000 - $67ff
+	.dc.b	ROMTYPE_NORM/256		; $6800 - $6fff
+	.dc.b	ROMTYPE_NORM/256		; $7000 - $77ff
+	.dc.b	ROMTYPE_NORM/256		; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ROMTYPE_NORM/256		; $9000 - $97ff
+	.dc.b	ROMTYPE_NORM/256		; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ROMTYPE_NORM/256		; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+	
+	
+	; 6 : SNATCHER
+	.dc.b	ROMTYPE_NORM/256		; $4000 - $47ff
+	.dc.b	ROMTYPE_NORM/256		; $4800 - $4fff
+	.dc.b	ROMTYPE_NORM/256		; $5000 - $57ff
+	.dc.b	ROMTYPE_NORM/256		; $5800 - $5fff
+	.dc.b	ROMTYPE_NORM/256		; $6000 - $67ff
+	.dc.b	ROMTYPE_NORM/256		; $6800 - $6fff
+	.dc.b	ROMTYPE_NORM/256		; $7000 - $77ff
+	.dc.b	ROMTYPE_NORM/256		; $7800 - $7fff
+	
+	.dc.b	ROMTYPE_NORM/256		; $8000 - $87ff
+	.dc.b	ROMTYPE_NORM/256		; $8800 - $8fff
+	.dc.b	ROMTYPE_NORM/256		; $9000 - $97ff
+	.dc.b	ROMTYPE_NORM/256		; $9800 - $9fff
+	.dc.b	ROMTYPE_NORM/256		; $a000 - $a7ff
+	.dc.b	ROMTYPE_NORM/256		; $a800 - $afff
+	.dc.b	ROMTYPE_NORM/256		; $b000 - $b7ff
+	.dc.b	ROMTYPE_NORM/256		; $b800 - $bfff
+
+
+;---
+setSlotInfo_MEGAROM_err_open:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	@f(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+@@:
+	.dc.b	': ファイルがオープンできません。',CR,LF,0
+	.even
+
+
+;---
+setSlotInfo_MEGAROM_err_read:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	@f(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+@@:
+	.dc.b	': ファイルが読めません。',CR,LF,0
+	.even
+
+
+;---
+setSlotInfo_MEGAROM_err_size:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	@f(pc),a0
+	bsr	printString
+	
+	*-- ファイルのクローズ
+	move.w	(fileHandle_ROM),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+@@:
+	.dc.b	': ファイルのサイズが不正です。',CR,LF,0
+	.even
+
+
+;---
+setSlotInfo_MEGAROM_err_header:
+	lea	O_FILENAME(a6),a0		* ファイル名
+	bsr	printString
+	
+	lea	@f(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+@@:
+	.dc.b	': MEGAROM ファイルではありません。',CR,LF,0
+	.even
+
+
+
+
+;--------------------------------
+; メガロム管理テーブル領域の確保
+;
+; out: d0.l
+
+allocMEGAROMtable:
+	tst.w	(freeMEGAROM_tbl)
+	bne	1f
+	
+	move.l	#8*1024,d0
+	bsr	memoryAlloc
+	tst.l	d0
+	beq	9f
+	
+	;--
+	move.l	d0,(nextMEGAROM_tbl)
+	move.w	#(8*1024)/(256*4),(freeMEGAROM_tbl)
+	
+	
+	;-- 全てのポインタを未実装メモリに設定
+	bsr	getUnmappedPage		;=>d0.l
+	tst.l	d0
+	beq	9f
+	
+	movem.l	d1/a0,-(sp)
+	movea.l	(nextMEGAROM_tbl),a0
+	move.w	#8*1024/4-1,d1
+@@:	move.l	d0,(a0)+
+	dbra	d1,@b
+	movem.l	(sp)+,d1/a0
+	
+	addi.l	#4*256/2,(nextMEGAROM_tbl)
+	
+1:	;---
+	sub.w	#1,(freeMEGAROM_tbl)
+	move.l	(nextMEGAROM_tbl),d0
+	addi.l	#4*256,(nextMEGAROM_tbl)
+	
+	rts
+	
+	;----------------
+9:	;-- メモリ不足
+	moveq.l	#0,d0
+	
+	rts
+
+
+*----------------------------------------------------------------------------------------------
+* スロット設定情報の表示
+*
+*  IN:	d4.w ... ページ番号
+*	d5.w ... 基本スロット番号
+*	d6.w ... 拡張スロット番号
+*	a6.l ... スロット設定情報テーブルへのポインタ
+* OUT:	d0.l ... 0:正常  !0:エラー
+*
+*		SLOT n-n PAGE n : ROM [filename] [patfname]
+*		SLOT n-n PAGE n : RAM
+*		SLOT n-n PAGE n : MAPPER n segment
+
+printSlotInfo:
+	
+	*-- スイッチ -I が指定されていない場合は表示しない
+	tst.b	(verboseMode)
+	bne	@f
+	
+printSlotInfo_ret:
+	moveq.l	#0,d0
+	
+	rts
+	
+@@:
+	*-- 設定されていないページの場合は、表示をしない
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a6)
+	beq	printSlotInfo_ret
+	
+	*-- スロット番号、ページ番号表示
+	move.b	d5,d0
+	addi.b	#'0',d0
+	move.b	d0,(prSlotInfo_slotNum)
+	
+	move.b	d6,d0
+	addi.b	#'0',d0
+	move.b	d0,(prSlotInfo_extSlotNum)
+	
+	move.b	d4,d0
+	addi.b	#'0',d0
+	move.b	d0,(prSlotInfo_pageNum)
+	
+	lea	prSlotInfo_str_slot_page(pc),a0
+	bsr	printString
+	
+	
+	*-- ページのタイプ別の表示
+	move.b	O_PAGE_TYPE(a6),d0
+	
+	cmpi.b	#PAGE_TYPE_RAM,d0
+	beq	printSlotInfo_RAM
+	
+	cmpi.b	#PAGE_TYPE_ROM,d0
+	beq	printSlotInfo_ROM
+	
+	cmpi.b	#PAGE_TYPE_MAPPER,d0
+	beq	printSlotInfo_MAPPER
+	
+	cmpi.b	#PAGE_TYPE_MEGAROM,d0
+	beq	printSlotInfo_MEGAROM
+	
+	*-- 内部エラー
+	lea	emsg_internal,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*-- ページタイプ RAM の情報表示
+printSlotInfo_RAM:
+	lea	prSlotInfo_str_RAM(pc),a0
+	bsr	printString
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- ページタイプ ROM の情報表示
+printSlotInfo_ROM:
+	lea	prSlotInfo_str_ROM(pc),a0
+	bsr	printString
+	
+	;-- ROMファイル名
+	lea	O_FILENAME(a6),a0
+	bsr	printString
+	
+	lea	prSlotInfo_str_ROM2(pc),a0
+	bsr	printString
+	
+	;-- パッチファイル名
+	tst.b	O_PATFNAME(a6)
+	beq	@f
+	
+	lea	prSlotInfo_str_ROM3(pc),a0
+	bsr	printString
+	
+	lea	O_PATFNAME(a6),a0
+	bsr	printString
+	
+	lea	prSlotInfo_str_ROM2(pc),a0
+	bsr	printString
+	
+@@:
+	;-- 改行
+	lea	prSlotInfo_str_CRLF(pc),a0
+	bsr	printString
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- ページタイプ MAPPER の情報表示
+printSlotInfo_MAPPER:
+	lea	prSlotInfo_segment(pc),a0
+	
+	*-- セグメント数取得
+	move.w	O_SEGMENT(a6),d0
+	
+	*-- 100の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subi.w	#100,d0
+	bcc	@b
+	addi.w	#100,d0
+	move.b	d1,(a0)+
+	
+	*-- 10の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subi.w	#10,d0
+	bcc	@b
+	addi.w	#10,d0
+	move.b	d1,(a0)+
+	
+	*-- 1の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subq.w	#1,d0
+	bcc	@b
+	move.b	d1,(a0)+
+	
+	*-- 情報表示
+	lea	prSlotInfo_str_MAPPER(pc),a0
+	bsr	printString
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+
+;-- ページタイプ MEGAROM の情報表示
+; MEGAROM [fname] [type]
+
+printSlotInfo_MEGAROM:
+	lea	prSlotInfo_str_MEGAROM(pc),a0
+	bsr	printString
+	
+	;-- ROMファイル名
+	lea	O_FILENAME(a6),a0
+	bsr	printString
+	
+	lea	prSlotInfo_str_MEGAROM2(pc),a0
+	bsr	printString
+	
+	;-- メガロムタイプ
+	move.b	O_ROM_TYPE(a6),d0
+	ext.w	d0
+	add.w	d0,d0
+	move.w	prSlotInfo_str_MEGAROM_type(pc,d0.w),d0
+	lea	prSlotInfo_str_MEGAROM_type(pc,d0.w),a0
+	bsr	printString
+	
+	lea	prSlotInfo_str_MEGAROM3(pc),a0
+	bsr	printString
+	
+	;-- セグメント数表示
+	lea	prSlotInfo_str_MEGAROM4(pc),a0
+	
+	*-- セグメント数取得
+	move.w	O_SEGMENT(a6),d0
+	
+	*-- 100の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subi.w	#100,d0
+	bcc	@b
+	addi.w	#100,d0
+	move.b	d1,(a0)+
+	
+	*-- 10の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subi.w	#10,d0
+	bcc	@b
+	addi.w	#10,d0
+	move.b	d1,(a0)+
+	
+	*-- 1の位
+	moveq.l	#'0'-1,d1
+@@:	addq.w	#1,d1
+	subq.w	#1,d0
+	bcc	@b
+	move.b	d1,(a0)+
+	
+	*-- 情報表示
+	lea	prSlotInfo_str_MEGAROM4(pc),a0
+	bsr	printString
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+prSlotInfo_str_MEGAROM_type:
+@@:
+	.dc.w	1f-@b	; 0: KONAMI (with SCC)
+	.dc.w	2f-@b	; 1: ASCII (8K)
+	.dc.w	3f-@b	; 2: ASCII (16K)
+	.dc.w	4f-@b	; 3: Panasonic
+	.dc.w	5f-@b	; 4: KONAMI
+	.dc.w	6f-@b	; 5: R-TYPE
+	.dc.w	7f-@b	; 6: SNATCHER
+	
+1:	.dc.b	'KONAMI (with SCC)',0
+2:	.dc.b	'ASCII (8K)',0
+3:	.dc.b	'ASCII (16K)',0
+4:	.dc.b	'Panasonic (未サポート)',0
+5:	.dc.b	'KONAMI',0
+6:	.dc.b	"'R-TYPE'",0
+7:	.dc.b	"'SNATCHER'",0
+
+
+prSlotInfo_str_MEGAROM:
+	.dc.b	'MEGAROM [',0
+
+prSlotInfo_str_MEGAROM2:
+	.dc.b	'] [',0
+
+prSlotInfo_str_MEGAROM3:
+	.dc.b	'] [',0
+
+prSlotInfo_str_MEGAROM4:
+	.dc.b	'999]',CR,LF,0
+
+*--
+prSlotInfo_str_slot_page:
+	.dc.b	'SLOT '
+prSlotInfo_slotNum:
+	.dc.b	'n'
+	.dc.b	'-'
+prSlotInfo_extSlotNum:
+	.dc.b	'n'
+	.dc.b	' PAGE '
+prSlotInfo_pageNum:
+	.dc.b	'n'
+	.dc.b	' : '
+	.dc.b	0
+
+
+prSlotInfo_str_RAM:
+	.dc.b	'RAM',CR,LF,0
+
+
+prSlotInfo_str_ROM:
+	.dc.b	'ROM [',0
+
+prSlotInfo_str_ROM2:
+	.dc.b	']',0
+
+prSlotInfo_str_ROM3:
+	.dc.b	' [',0
+
+
+prSlotInfo_str_MAPPER:
+	.dc.b	'MAPPER ['
+prSlotInfo_segment:
+	.dc.b	'   '
+	.dc.b	']',CR,LF,0
+
+
+prSlotInfo_str_CRLF:
+	.dc.b	CR,LF,0
+
+	.even
+
+
+
+*----------------------------------------------------------------------------------------------
+* コマンドラインの処理
+*
+*	filename	コンフィグファイルの指定
+*	-D		Z80デバッガを起動
+*	-V		詳細を表示
+
+procCommandLine:
+	movea.l	(CommandLineAdr),a0
+	
+	*-- skip length
+	addq.l	#1,a0
+	
+	*-- skip space
+procCmdLine_loop:
+	bsr	skipSpace
+	beq	procCmdLine_ret
+	
+	*--
+	cmpi.b	#'-',d0
+	bne	procCmdLine_fileName
+	
+	move.b	(a0)+,d0
+	
+	;-- -d
+	cmpi.b	#'D',d0
+	beq	procCmdLine_switch_D
+	cmpi.b	#'d',d0
+	beq	procCmdLine_switch_D
+	
+	;-- -i
+	cmpi.b	#'I',d0
+	beq	procCmdLine_switch_V
+	cmpi.b	#'i',d0
+	beq	procCmdLine_switch_V
+	
+.ifdef DEBUG
+	;-- -k
+	cmpi.b	#'K',d0
+	beq	procCmdLine_switch_K
+	cmpi.b	#'k',d0
+	beq	procCmdLine_switch_K
+.endif
+	
+	;-- -w
+	cmpi.b	#'W',d0
+	beq	procCmdLine_switch_W
+	cmpi.b	#'w',d0
+	beq	procCmdLine_switch_W
+	
+	;-- -u
+	cmpi.b	#'U',d0
+	beq	procCmdLine_countUpdate
+	cmpi.b	#'u',d0
+	beq	procCmdLine_countUpdate
+	
+	;-- -b
+	cmpi.b	#'B',d0
+	beq	procCmdLine_breakPoint
+	cmpi.b	#'b',d0
+	beq	procCmdLine_breakPoint
+	
+	;-- -f
+	cmpi.b	#'F',d0
+	beq	procCmdLine_ForceUseGraphic
+	cmpi.b	#'f',d0
+	beq	procCmdLine_ForceUseGraphic
+	
+	
+invalidOption:
+	*-- 不正なオプション
+	lea.l	emsg_Usage(pc),a0
+	bsr	printString
+	
+procCmdLine_ret_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+	*-- 正常リターン
+procCmdLine_ret:
+	moveq.l	#0,d0
+	
+	rts
+
+
+emsg_Usage:
+	.dc.b	'Usage: emes.x [switch]... [filename] [switch]...',CR,LF
+	.dc.b	'        filename  コンフィグファイルの指定 (デフォルト:emes.cfg)',CR,LF
+	.dc.b	'        -I        スロット情報を表示',CR,LF
+	.dc.b	'        -W[n]     割り込み周期を n/60Hz にする',CR,LF
+	.dc.b	'        -U        VDISP割り込み２回で画面更新する',CR,LF
+	.dc.b	'        -D        Z80デバッガを起動',CR,LF
+.ifdef DEBUG
+	.dc.b	'        -K        キーボード割り込みを登録しない（デバッグ用）',CR,LF
+.endif
+	.dc.b	'        -B<adr>   ブレイクポイント設定',CR,LF
+	.dc.b	'        -F        グラフィック画面の強制使用',CR,LF
+	.dc.b	0
+	.even
+
+
+*----------
+* コンフィグファイルの指定
+
+procCmdLine_fileName:
+	tst.w	(flag_setConfigFile)
+	bne	procCmdLine_err_fname
+	
+	move.w	#-1,(flag_setConfigFile)
+	
+	lea	configFileName(pc),a1
+	
+@@:
+	move.b	d0,(a1)+
+	
+	move.b	(a0)+,d0
+	beq	@f
+	
+	cmpi.b	#' ',d0
+	beq	@f
+	
+	cmpi.b	#TAB,d0
+	bne	@b
+@@:
+	clr.b	(a1)
+	
+	subq.l	#1,a0
+	
+	bra	procCmdLine_loop
+
+
+procCmdLine_err_fname:
+	lea	emsg_multiConfigFile(pc),a0
+	bsr	printString
+	
+	bra	procCmdLine_ret_err
+
+
+emsg_multiConfigFile:
+	.dc.b	'複数のコンフィグファイルは指定できません。',CR,LF,0
+	.even
+
+
+*----------
+* スイッチ -D	Z80デバッガの起動
+
+procCmdLine_switch_D:
+	
+	*--
+	move.b	#-1,(FlagDebuggerON)
+	
+	*-- 余計な文字があったらエラー
+	tst.b	(a0)
+	beq	@f
+	
+	cmpi.b	#' ',(a0)
+	beq	@f
+	
+	cmpi.b	#TAB,(a0)
+	bne	invalidOption
+@@:	
+	bra	procCmdLine_loop
+
+
+*----------
+* スイッチ -V	詳細の表示
+
+procCmdLine_switch_V:
+	
+	*-- 
+	move.b	#-1,(verboseMode)
+	
+	*-- 余計な文字があったらエラー
+	tst.b	(a0)
+	beq	@f
+	
+	cmpi.b	#' ',(a0)
+	beq	@f
+	
+	cmpi.b	#TAB,(a0)
+	bne	invalidOption
+@@:	
+	bra	procCmdLine_loop
+
+
+
+.ifdef DEBUG
+*----------
+* スイッチ -K	デバッグ用 キーボード割り込みルーチンを登録しない
+
+procCmdLine_switch_K:
+	move.b	#-1,(_noKeyInt)
+	
+	tst.b	(a0)
+	beq	@f
+	
+	cmpi.b	#' ',(a0)
+	beq	@f
+	
+	cmpi.b	#TAB,(a0)
+	bne	invalidOption
+@@:
+	bra	procCmdLine_loop
+
+.endif
+
+
+*----------
+* スイッチ -W	垂直帰線割り込みの周期
+
+procCmdLine_switch_W:
+	move.w	#2,(_CountVDISP)
+	move.w	#2,(_CountUpdate)
+	
+	;-- 割り込みと画面更新を交互に行わせる
+	move.w	#1,(_cnt_CountVDISP)
+	move.w	#2,(_cnt_CountUpdate)
+	
+@@:
+	tst.b	(a0)
+	beq	procCmdLine_loop
+	
+	cmpi.b	#' ',(a0)
+	beq	procCmdLine_loop
+	
+	cmpi.b	#TAB,(a0)
+	beq	procCmdLine_loop
+	
+	move.b	(a0)+,d0
+	bsr	checkDigit
+	bne	invalidOption
+	
+	subi.b	#'0',d0
+	ext.w	d0
+	
+	move.w	d0,(_CountVDISP)
+	move.w	d0,(_CountUpdate)
+	move.w	d0,(_cnt_CountVDISP)
+	addq.w	#1,d0
+	move.w	d0,(_cnt_CountUpdate)
+	
+	bra	@b
+
+
+;----------
+; スイッチ -U	画面更新の周期
+
+procCmdLine_countUpdate:
+	move.w	#2,(_CountUpdate)
+	
+	tst.b	(a0)
+	beq	@f
+	
+	cmpi.b	#' ',(a0)
+	beq	@f
+	
+	cmpi.b	#TAB,(a0)
+	bne	invalidOption
+@@:
+	bra	procCmdLine_loop
+
+
+;----------
+; スイッチ グラフィック画面の強制使用
+;	a0 ... コマンドライン
+
+procCmdLine_ForceUseGraphic:
+	move.b	#-1,(flagForceUse)
+	
+	tst.b	(a0)
+	beq	@f
+	
+	cmpi.b	#' ',(a0)
+	beq	@f
+	
+	cmpi.b	#TAB,(a0)
+	bne	invalidOption
+@@:
+	bra	procCmdLine_loop
+
+
+;----------
+; スイッチ　ブレークポイント設定
+;	a0 ... コマンドライン
+
+procCmdLine_breakPoint:
+	
+	;-- パラメータがなければエラー
+	tst.b	(a0)
+	beq	invalidOption
+	
+	cmpi.b	#' ',(a0)
+	beq	invalidOption
+	
+	cmpi.b	#TAB,(a0)
+	beq	invalidOption
+	
+	;--
+	moveq.l	#0,d1
+	
+@@:
+	move.b	(a0)+,d0
+	
+	bsr	checkHexDigit
+	bne	@f
+	
+	bsr	hex2i
+	asl.l	#4,d1
+	add.b	d0,d1
+	
+	bra	@b
+	
+@@:
+	tst.b	d0
+	beq	@f
+	cmpi.b	#' ',d0
+	beq	@f
+	cmpi.b	#TAB,d0
+	bne	invalidOption
+	
+@@:
+	subq.w	#1,a0
+	
+	;-- デバッガ起動
+	move.b	#-1,(FlagDebuggerON)
+	
+	;-- ブレイクポイント設定
+	move.b	#-1,(FlagBreakPoint)
+	addq.w	#1,d1
+	move.w	d1,(BreakPoint)
+	
+	bra	procCmdLine_loop
+
+
+
+*----------
+* 空白をスキップ
+*
+*  IN:	a0.l   ... 文字列
+*  OUT:	d0.b   ... 最初の文字
+*	a0.l   ... 空白以外の文字のアドレス＋１
+*	Z flag ... 0: 空白以外の文字を検出  1: '\0'を検出
+
+skipSpace:
+@@:	move.b	(a0)+,d0
+	beq	@f
+	
+	cmpi.b	#' ',d0
+	beq	@b
+	
+	cmpi.b	#TAB,d0
+	beq	@b
+@@:	
+	rts
+
+
+*----------------------------------------------------------------------------------------------
+* コンフィグファイルの処理
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+*   コンフィグファイルの例:
+*
+*	; ';'はコメント
+*	ROM	SLOT 0-0 PAGE 0 BIOS.ROM	; コメント
+*	ROM	SLOT 0-0 PAGE 1 BASIC.ROM
+*	ROM	SLOT 3-1 PAGE 1 DISK.ROM
+*	ROM	SLOT 3-3 PAGE 1 FMPAC.ROM
+*	ROM	SLOT 3-0 PAGE 1 RS232.ROM
+*	RAM	SLOT 0-1 PAGE 0
+*	RAM	SLOT 0-1 PAGE 1
+*	RAM	SLOT 0-1 PAGE 2
+*	RAM	SLOT 0-1 PAGE 3
+*	MAPPER	SLOT 3-2 SEGMENT 256
+*	MEGAROM	SLOT 1-0 GRADIUS2.ROM
+*	DRIVER	SLOT   SLOT.DRV
+*	DRIVER	SOUND  PSG.DRV
+
+procConfigFile:
+	
+	*-- コンフィグファイルのオープン
+	clr.w	-(sp)			* 読み込みモード
+	pea.l	configFileName		* ファイル名
+	DOS	__OPEN
+	addq.l	#6,sp
+	
+	tst.l	d0
+	bmi	procConfigFile_err_open
+	
+	*-- ファイルハンドル保存
+	move.w	d0,(readLineFileHandle)
+	
+	*-- 行番号クリア
+	clr.w	(readLineLineNum)
+	
+	
+procConfigFile_loop:
+	
+	*-- １行読みだし
+	bsr	readLine
+	tst.l	d0
+	bne	procConfigFile_err_read
+	
+	*-- トークンテーブル
+	lea	tokenTable(pc),a5
+	
+	*-- ファイル終了 ?
+	tst.l	(a5)			* 最初のトークンがない場合は EOF に達している
+	beq	procConfigFile_ret
+	
+	*-- 第１トークン取り出し
+	movea.l	(a5)+,a0
+	
+	*-- [ROM] ?
+	lea	str_ROM(pc),a1
+	bsr	stricmp
+	bne	@f
+	bsr	procROM
+	tst.l	d0
+	bne	procConfigFile_err
+	
+	bra	procConfigFile_loop
+	
+	
+@@:	*-- [RAM] ?
+	lea	str_RAM(pc),a1
+	bsr	stricmp
+	bne	@f
+	bsr	procRAM
+	tst.l	d0
+	bne	procConfigFile_err
+	
+	bra	procConfigFile_loop
+	
+	
+@@:	*-- [MAPPER] ?
+	lea	str_MAPPER(pc),a1
+	bsr	stricmp
+	bne	@f
+	bsr	procMAPPER
+	tst.l	d0
+	bne	procConfigFile_err
+	
+	bra	procConfigFile_loop
+	
+@@:	;-- [DRIVER] ?
+	lea	str_DRIVER(pc),a1
+	bsr	stricmp
+	bne	@f
+	bsr	procDRIVER
+	tst.l	d0
+	bne	procConfigFile_err
+	
+	bra	procConfigFile_loop
+	
+@@:	;-- [MEGAROM] ?
+	lea	str_MEGAROM(pc),a1
+	bsr	stricmp
+	bne	@f
+	bsr	procMEGAROM
+	tst.l	d0
+	bne	procConfigFile_err
+	
+	bra	procConfigFile_loop
+	
+@@:	
+procConfigFile_err_cmd:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_configFile_cmd(pc),a0
+	bsr	printString
+	
+	move.w	(readLineFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+
+*--
+procConfigFile_ret:
+	*-- ファイルクローズ
+	move.w	(readLineFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+	
+	
+	*------------------
+	*-- オープンエラー
+procConfigFile_err_open:
+	bsr	printConfigFileName
+	
+	lea.l	emsg_configFile_open(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procConfigFile_err_read:
+	bsr	printConfigFileName
+	
+	lea.l	emsg_configFile_read(pc),a0
+	bsr	printString
+	
+	move.w	(readLineFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procConfigFile_err
+	move.w	(readLineFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+
+emsg_configFile_open:
+	.dc.b	': ファイルがオープンできません。',CR,LF,0
+
+emsg_configFile_read:
+	.dc.b	': ファイルが読めません。',CR,LF,0
+
+emsg_configFile_cmd:
+	.dc.b	': 不正な指定があります。',CR,LF,0
+
+	.even
+
+
+*----------
+* コンフィグファイル名を表示
+
+printConfigFileName:
+	lea.l	configFileName(pc),a0
+	bsr	printString
+	
+	rts
+
+;----------
+; パッチファイル名を表示
+
+printPatchFileName:
+	movea.l	a3,a0
+	bsr	printString
+	
+	rts
+
+
+;----------
+; パッチファイル名と行番号を表示
+;	a3.l ... パッチファイル名
+
+printPatchFileNameWithLine:
+	bsr	printPatchFileName
+	
+	bra	@f
+
+
+*----------
+* コンフィグファイル名と行番号を表示
+
+printConfigFileNameWithLine:
+	bsr	printConfigFileName
+	
+@@:
+	lea	lineNum_strbuf(pc),a0
+	move.w	(readLineLineNum),d0
+	
+	moveq.l	#5-1,d1				* loop counter
+1:
+	ext.l	d0
+	divu.w	#10,d0
+	bne	@f
+	
+	*-- 商が０の場合、余りが０ならば空白を、０以外ならば数字を書き込む
+	tst.l	d0
+	bne	@f
+	
+	move.b	#' ',-(a0)
+	
+	bra	2f
+	
+	*-- 余りを文字として書き込む
+@@:	swap.w	d0
+	addi.b	#'0',d0
+	move.b	d0,-(a0)
+	swap.w	d0
+2:
+	dbra	d1,1b
+	
+	move.b	#' ',(a0)
+	
+	bsr	printString
+	
+	rts
+
+
+	.dc.b	' 65535',0
+lineNum_strbuf:
+	.even
+
+
+
+*----------
+* ROM
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+*  Note:指定ページが既に設定されている場合はエラー
+*
+*	ROM SLOT 0-0 PAGE 0 BIOS.ROM BIOS.PAT
+*	         | |      | |        |
+*	         | |      | |        +-- パッチファイル名 (省略可)
+*	         | |      | |
+*	         | |      | +----------- ROM ファイル名
+*	         | |      +------------- ページ番号 (0 - 3)
+*	         | +-------------------- 拡張スロット番号 (0 - 3)
+*	         +---------------------- 基本スロット番号 (0 - 3)
+
+procROM:
+	*-- SLOT n-n 取り出し
+	bsr	getSlotNumber
+	tst.l	d0
+	bne	procROM_err_SLOT
+	
+	*-- PAGE n 取り出し
+	bsr	getPageNumber
+	tst.l	d0
+	bne	procROM_err_PAGE
+	
+	*-- ROM ファイル名取り出し
+	bsr	getFileName
+	tst.l	d0
+	bne	procROM_err_fileName
+	
+	
+	*-- スロット情報テーブルのアドレスを求める (a0)
+	bsr	getSlotInfoTableAdr
+	
+	*-- 既に指定ページが設定ずみの場合はエラー
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a0)
+	bne	procROM_err_already
+	
+	*-- ページタイプ設定
+	move.b	#PAGE_TYPE_ROM,O_PAGE_TYPE(a0)
+	
+	*-- ファイル名設定
+	move.w	#SZ_FILENAME-1,d0
+	lea	O_FILENAME(a0),a1
+	lea	fileNameBuf(pc),a2
+@@:
+	move.b	(a2)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	
+	;-- ここで行が終了していない場合はパッチファイル指定がある
+	tst.l	(a5)
+	beq	procROM_ret
+	
+	;-- パッチファイル名取り出し
+	move.l	a0,-(sp)
+	bsr	getFileName
+	movea.l	(sp)+,a0
+	tst.l	d0
+	bne	procROM_err_patchFileName
+	
+	;-- パッチファイル名設定
+	lea	O_PATFNAME(a0),a1
+	lea	fileNameBuf(pc),a2
+	move.w	#SZ_PATFNAME-1,d0
+@@:
+	move.b	(a2)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	
+	
+	*-- ここで行が終了していない場合はエラー
+	tst.l	(a5)
+	bne	procROM_err_EOS
+	
+	
+procROM_ret:
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+procROM_err_SLOT:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procROM_SLOT(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procROM_err_PAGE:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procROM_PAGE(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procROM_err_fileName:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procROM_fileName(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procROM_err_patchFileName:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procROM_patchFileName(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procROM_err_EOS:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procROM_EOS(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procROM_err_already:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procROM_already(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procROM_SLOT:
+	.dc.b	': [ROM] スロット番号の指定に誤りがあります。',CR,LF,0
+
+emsg_procROM_PAGE:
+	.dc.b	': [ROM] ページ番号の指定に誤りがあります。',CR,LF,0
+
+emsg_procROM_fileName:
+	.dc.b	': [ROM] ファイル名の指定に誤りがあります。',CR,LF,0
+
+emsg_procROM_patchFileName:
+	.dc.b	': [ROM] パッチファイル名の指定に誤りがあります。',CR,LF,0
+
+emsg_procROM_EOS:
+	.dc.b	': [ROM] 指定に誤りがあります。',CR,LF,0
+
+emsg_procROM_already:
+	.dc.b	': [ROM] 指定ページは設定済みです。',CR,LF,0
+
+	.even
+
+
+*----------
+* RAM
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+*  Note:指定ページが既に設定されている場合はエラー
+*
+*	RAM SLOT 0-1 PAGE 0
+*	         | |      |
+*	         | |      +---------- ページ番号 (0 - 3)
+*	         | +----------------- 拡張スロット番号 (0 - 3)
+*	         +------------------- 基本スロット番号 (0 - 3)
+
+procRAM:
+	*-- SLOT n-n 取り出し
+	bsr	getSlotNumber
+	tst.l	d0
+	bne	procRAM_err_SLOT
+	
+	*-- PAGE n 取り出し
+	bsr	getPageNumber
+	tst.l	d0
+	bne	procRAM_err_PAGE
+	
+	*-- ここで行が終了していない場合はエラー
+	tst.l	(a5)
+	bne	procRAM_err_EOS
+	
+	*-- スロット情報テーブルのアドレスを求める (a0)
+	bsr	getSlotInfoTableAdr
+	
+	*-- 既に指定ページが設定ずみの場合はエラー
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a0)
+	bne	procRAM_err_already
+	
+	*-- ページタイプ設定
+	move.b	#PAGE_TYPE_RAM,O_PAGE_TYPE(a0)
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+procRAM_err_SLOT:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procRAM_SLOT(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procRAM_err_PAGE:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procRAM_PAGE(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procRAM_err_EOS:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procRAM_EOS(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+procRAM_err_already:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procRAM_already(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procRAM_SLOT:
+	.dc.b	': [RAM] スロット番号の指定に誤りがあります。',CR,LF,0
+
+emsg_procRAM_PAGE:
+	.dc.b	': [RAM] ページ番号の指定に誤りがあります。',CR,LF,0
+
+emsg_procRAM_EOS:
+	.dc.b	': [RAM] 指定に誤りがあります。',CR,LF,0
+
+emsg_procRAM_already:
+	.dc.b	': [RAM] 指定ページは設定済みです。',CR,LF,0
+
+	.even
+
+
+
+*----------
+* MAPPER
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+*  Note:メモリマッパーは１つのみ設定可能
+*	指定スロットが既に設定されている場合はエラー
+*
+*	MAPPER SLOT 3-2 SEGMENT 256
+*	            | |          |
+*	            | |          +--- セグメント数 (4 - 256)
+*	            | +-------------- 拡張スロット番号 (0 - 3)
+*	            +---------------- 基本スロット番号 (0 - 3)
+
+procMAPPER:
+	*-- SLOT n-n 取り出し
+	bsr	getSlotNumber
+	tst.l	d0
+	bne	procMAPPER_err_SLOT
+	
+	*-- SEGMENT n 取り出し
+	bsr	getSegmentNumber
+	tst.l	d0
+	bne	procMAPPER_err_SEGMENT
+	
+	*-- ここで行が終了していない場合はエラー
+	tst.l	(a5)
+	bne	procMAPPER_err_EOS
+	
+	
+	*-- スロット情報テーブル(ページ０)のアドレスを求める (a0)
+	clr.b	(pageNumber)
+	bsr	getSlotInfoTableAdr
+	
+	
+	*-- スロットの全てのページをマッパーに設定
+	move.w	#4-1,d1
+@@:
+	*-- 既に指定ページが設定ずみの場合はエラー
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a0)
+	bne	procMAPPER_err_already
+	
+	*-- ページタイプ設定
+	move.b	#PAGE_TYPE_MAPPER,O_PAGE_TYPE(a0)
+	
+	*-- セグメント数
+	move.w	(segmentNumber),O_SEGMENT(a0)
+	
+	*-- 次のページ
+	lea	SZ_SLOT_INFO(a0),a0
+	
+	dbra	d1,@b
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- スロット番号が不正
+procMAPPER_err_SLOT:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procMAPPER_SLOT(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+*-- セグメント番号が不正
+procMAPPER_err_SEGMENT:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procMAPPER_SEGMENT(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+*-- 指定に誤り
+procMAPPER_err_EOS:
+	bsr	printConfigFileNameWithLine
+	
+	lea.l	emsg_procMAPPER_EOS(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+
+*-- 既にページは設定済み
+procMAPPER_err_already:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procMAPPER_already(pc),a0
+	bsr	printString
+	
+	*-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+emsg_procMAPPER_SLOT:
+	.dc.b	': [MAPPER] スロット番号の指定に誤りがあります。',CR,LF,0
+
+emsg_procMAPPER_SEGMENT:
+	.dc.b	': [MAPPER] セグメント数の指定に誤りがあります。',CR,LF,0
+
+emsg_procMAPPER_EOS:
+	.dc.b	': [MAPPER] 指定に誤りがあります。',CR,LF,0
+
+emsg_procMAPPER_already:
+	.dc.b	': [MAPPER] 指定スロットは設定済みです。',CR,LF,0
+
+	.even
+
+
+*----------
+* DRIVER
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:正常  !0:エラー
+*
+
+procDRIVER:
+	;-- トークン取り出し
+	tst.l	(a5)
+	beq	procDRIVER_err
+	movea.l	(a5)+,a0
+	
+	;-- ドライバーの種類
+	; [SLOT] ?
+	lea	str_SLOT(pc),a1
+	bsr	stricmp
+	tst.l	d0
+	beq	procDRIVER_SLOT
+	
+	; [SOUND] ?
+	lea	str_SOUND(pc),a1
+	bsr	stricmp
+	tst.l	d0
+	beq	procDRIVER_SOUND
+	
+	
+	;-- エラー
+procDRIVER_err:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procDRIVER(pc),a0
+	bsr	printString
+	
+	;-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+
+emsg_procDRIVER:
+	.dc.b	': [DRIVER] ドライバ指定に誤りがあります。',CR,LF,0
+	.even
+
+
+
+;----------
+procDRIVER_SLOT:
+	;-- トークン取り出し
+	tst.l	(a5)
+	beq	procDRIVER_err
+	movea.l	(a5)+,a0
+	
+	lea	fileName_driverSLOT,a1
+	
+	move.w	#SZ_DRVFNAME-1,d0
+@@:
+	move.b	(a0)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	;-- 行が終了していなければエラー
+	tst.l	(a5)
+	bne	procDRIVER_err
+	
+	;-- 正常終了
+	moveq.l	#0,d0
+	
+	rts
+
+
+;---------------------------
+procDRIVER_SOUND:
+	;-- トークン取り出し
+	tst.l	(a5)
+	beq	procDRIVER_err
+	movea.l	(a5)+,a0
+	
+	lea	fileName_driverSOUND,a1
+	
+	move.w	#SZ_DRVFNAME-1,d0
+@@:
+	move.b	(a0)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	;-- 行が終了していなければエラー
+	tst.l	(a5)
+	bne	procDRIVER_err
+	
+	;-- 正常終了
+	moveq.l	#0,d0
+	
+	rts
+
+
+
+;----------------------------------------------------------------------------------------------
+; コンフィグファイル処理
+; [MEGAROM]
+;
+;  MEGAROM SLOT n-n fname
+;
+;  IN:	a5.l ... トークンテーブル
+;  OUT:	d0.l ... 0:正常  !0:エラー
+
+procMEGAROM:
+	;-- SLOT n-n 取り出し
+	bsr	getSlotNumber
+	tst.l	d0
+	bne	procMEGAROM_err_SLOT
+	
+	;-- ROM ファイル名取り出し
+	bsr	getFileName
+	tst.l	d0
+	bne	procMEGAROM_err_fileName
+	
+	;-- スロット情報テーブル(ページ１)のアドレスを求める (a0)
+	move.b	#1,(pageNumber)
+	bsr	getSlotInfoTableAdr
+	
+	;-- 既に指定ページが設定ずみの場合はエラー
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a0)
+	bne	procMEGAROM_err_already
+	
+	;-- ページタイプ設定
+	move.b	#PAGE_TYPE_MEGAROM,O_PAGE_TYPE(a0)
+	
+	;-- ファイル名設定
+	move.w	#SZ_FILENAME-1,d0
+	lea	O_FILENAME(a0),a1
+	lea	fileNameBuf(pc),a2
+@@:
+	move.b	(a2)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	
+	;-- スロット情報テーブル(ページ２)のアドレスを求める (a0)
+	move.b	#2,(pageNumber)
+	bsr	getSlotInfoTableAdr
+	
+	;-- ファイル名設定
+	move.w	#SZ_FILENAME-1,d0
+	lea	O_FILENAME(a0),a1
+	lea	fileNameBuf(pc),a2
+@@:
+	move.b	(a2)+,(a1)+
+	beq	@f
+	dbra	d0,@b
+	
+	clr.b	-(a1)
+@@:
+	
+	;-- 既に指定ページが設定ずみの場合はエラー
+	cmpi.b	#PAGE_TYPE_NULL,O_PAGE_TYPE(a0)
+	bne	procMEGAROM_err_already
+	
+	;-- ページタイプ設定
+	move.b	#PAGE_TYPE_MEGAROM,O_PAGE_TYPE(a0)
+	
+	;-- ここで行が終了していない場合はエラー
+	tst.l	(a5)
+	bne	procMEGAROM_err_EOS
+	
+	
+	
+	;-- 正常終了
+	moveq.l	#0,d0
+	
+	rts
+
+;---
+procMEGAROM_err_SLOT:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procMEGAROM_err_SLOT(pc),a0
+	bsr	printString
+	
+	;-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procMEGAROM_err_SLOT:
+	.dc.b	': [MEGAROM] スロット番号の指定に誤りがあります。',CR,LF,0
+	.even
+
+;---
+procMEGAROM_err_fileName:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procMEGAROM_err_fileName(pc),a0
+	bsr	printString
+	
+	;-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procMEGAROM_err_fileName:
+	.dc.b	': [MEGAROM] ファイル名の指定に誤りがあります。',CR,LF,0
+	.even
+
+;---
+procMEGAROM_err_already:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procMEGAROM_err_already(pc),a0
+	bsr	printString
+	
+	;-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procMEGAROM_err_already:
+	.dc.b	': [MEGAROM] 指定ページは設定済みです。',CR,LF,0
+	.even
+
+;---
+procMEGAROM_err_EOS:
+	bsr	printConfigFileNameWithLine
+	
+	lea	emsg_procMEGAROM_err_EOS(pc),a0
+	bsr	printString
+	
+	;-- エラー
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_procMEGAROM_err_EOS:
+	.dc.b	': [MEGAROM] 指定に誤りがあります。',CR,LF,0
+	.even
+
+
+
+*----------
+* スロット番号 [SLOT n-n] 取り出し
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:成功  !0:失敗
+
+getSlotNumber:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getSlotNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- 文字列 [SLOT] チェック
+	lea.l	str_SLOT(pc),a1
+	bsr	stricmp
+	bne	getSlotNumber_err
+	
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getSlotNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- 基本スロット番号
+	move.b	(a0)+,d0
+	bsr	checkSlotNumber
+	bne	getSlotNumber_err
+	
+	*-- 基本スロット番号保存
+	subi.b	#'0',d0
+	move.b	d0,(slotNumber)
+	
+	
+	*-- '-' チェック
+	cmpi.b	#'-',(a0)+
+	bne	getSlotNumber_err
+	
+	*-- 拡張スロット番号
+	move.b	(a0)+,d0
+	bsr	checkSlotNumber
+	bne	getSlotNumber_err
+	
+	*-- 拡張スロット番号保存
+	subi.b	#'0',d0
+	move.b	d0,(extSlotNumber)
+	
+	
+	*-- EOS チェック
+	tst.b	(a0)
+	bne	getSlotNumber_err
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+	
+	*-- エラーリターン
+getSlotNumber_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------
+* ページ番号 [PAGE n] 取り出し
+*
+*  IN:	a5.l ... トークンテーブル
+*  OUT:	d0.l ... 0:成功  !0:失敗
+
+getPageNumber:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getPageNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- 文字列 [PAGE] チェック
+	lea.l	str_PAGE(pc),a1
+	bsr	stricmp
+	bne	getPageNumber_err
+	
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getPageNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- ページ番号
+	move.b	(a0)+,d0
+	bsr	checkPageNumber
+	bne	getPageNumber_err
+	
+	*-- EOS チェック
+	tst.b	(a0)
+	bne	getPageNumber_err
+	
+	*-- ページ番号保存
+	subi.b	#'0',d0
+	move.b	d0,(pageNumber)
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+	
+	*-- エラーリターン
+getPageNumber_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------
+* スロット番号、ページ番号が不正でないかチェック
+*
+*  IN:	d0.b ... 番号 (chr)
+*  OUT:	Z flag ... 1:正常  0:不正
+
+checkSlotNumber:
+checkPageNumber:
+	cmpi.b	#'0',d0
+	beq	@f
+	cmpi.b	#'1',d0
+	beq	@f
+	cmpi.b	#'2',d0
+	beq	@f
+	cmpi.b	#'3',d0
+@@:
+	rts
+
+
+
+*----------
+* ファイル名取り出し
+
+getFileName:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getFileName_err
+	movea.l	(a5)+,a0
+	
+	*--
+	lea	fileNameBuf(pc),a1
+	move.w	#256-1,d1
+@@:
+	move.b	(a0)+,(a1)+
+	beq	@f
+	dbra	d1,@b
+	clr.b	-(a1)
+@@:
+	
+	moveq.l	#0,d0
+	
+	rts
+
+
+getFileName_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+fileNameBuf:	.ds.b	256
+
+
+
+*----------
+* SEGMENT n 取り出し
+
+getSegmentNumber:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getSegmentNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- 文字列 [SEGMENT] チェック
+	lea.l	str_SEGMENT(pc),a1
+	bsr	stricmp
+	bne	getSegmentNumber_err
+	
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getSegmentNumber_err
+	movea.l	(a5)+,a0
+	
+	*-- セグメント数
+	moveq.l	#0,d1
+@@:
+	move.b	(a0)+,d0
+	beq	@f
+	bsr	checkDigit
+	bne	getSegmentNumber_err
+	mulu.w	#10,d1
+	subi.b	#'0',d0
+	ext.w	d0
+	add.w	d0,d1
+	bra	@b
+@@:
+	*-- セグメント数が範囲内(4 - 256) にあるか ?
+	cmpi.w	#4,d1
+	bcs	getSegmentNumber_err
+	
+	cmpi.w	#256,d1
+	bhi	getSegmentNumber_err
+	
+	*-- セグメント数保存
+	move.w	d1,(segmentNumber)
+	
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+	
+	*-- エラーリターン
+getSegmentNumber_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------
+* 文字が数字かチェック
+*
+*  IN:	d0.b ... chr
+*  OUT:	Z flag ... 1:正常  0:不正
+
+checkDigit:
+	cmpi.b	#'0',d0
+	beq	@f
+	cmpi.b	#'1',d0
+	beq	@f
+	cmpi.b	#'2',d0
+	beq	@f
+	cmpi.b	#'3',d0
+	beq	@f
+	cmpi.b	#'4',d0
+	beq	@f
+	cmpi.b	#'5',d0
+	beq	@f
+	cmpi.b	#'6',d0
+	beq	@f
+	cmpi.b	#'7',d0
+	beq	@f
+	cmpi.b	#'8',d0
+	beq	@f
+	cmpi.b	#'9',d0
+@@:
+	rts
+
+
+*----------
+* 文字が16進文字かチェック
+checkHexDigit:
+	bsr	checkDigit
+	beq	@f
+	cmpi.b	#'A',d0
+	beq	@f
+	cmpi.b	#'B',d0
+	beq	@f
+	cmpi.b	#'C',d0
+	beq	@f
+	cmpi.b	#'D',d0
+	beq	@f
+	cmpi.b	#'E',d0
+	beq	@f
+	cmpi.b	#'F',d0
+	beq	@f
+	cmpi.b	#'a',d0
+	beq	@f
+	cmpi.b	#'b',d0
+	beq	@f
+	cmpi.b	#'c',d0
+	beq	@f
+	cmpi.b	#'d',d0
+	beq	@f
+	cmpi.b	#'e',d0
+	beq	@f
+	cmpi.b	#'f',d0
+@@:
+	rts
+
+
+
+
+
+*----------
+* スロット情報テーブルのアドレスを求める
+*  IN:	なし
+*  OUT:	a0.l ... スロット情報テーブルのアドレス
+
+getSlotInfoTableAdr:
+	move.l	d0,-(sp)
+	
+	lea	slotInfoTable,a0
+	
+	*-- 基本スロット番号
+	moveq.l	#0,d0
+	move.b	(slotNumber),d0
+	mulu.w	#4,d0
+	
+	*-- 拡張スロット番号
+	add.b	(extSlotNumber),d0
+	mulu.w	#4,d0
+	
+	*-- ページ番号
+	add.b	(pageNumber),d0
+	mulu.w	#SZ_SLOT_INFO,d0
+	
+	*--
+	adda.w	d0,a0
+	
+	move.l	(sp)+,d0
+	
+	rts
+
+
+
+*----------
+str_ROM:	.dc.b	'ROM',0
+str_RAM:	.dc.b	'RAM',0
+str_MAPPER:	.dc.b	'MAPPER',0
+str_DRIVER:	.dc.b	'DRIVER',0
+str_MEGAROM:	.dc.b	'MEGAROM',0
+
+str_SLOT:	.dc.b	'SLOT',0
+str_PAGE:	.dc.b	'PAGE',0
+str_SEGMENT:	.dc.b	'SEGMENT',0
+str_SOUND:	.dc.b	'SOUND',0
+	.even
+
+
+
+;----------------------------------------------------------------------------------------------
+; パッチ処理
+;	IN:	a3.l ... パッチファイル名
+;		a4.l ... パッチ対象データ領域
+;		d4.w ... ページ番号
+
+procPatchFile:
+	*-- 全レジスタ保存
+	movem.l	d1-d7/a0-a6,-(sp)
+	
+	
+	*-- パッチファイルのオープン
+	clr.w	-(sp)			* 読み込みモード
+	move.l	a3,-(sp)		* ファイル名
+	DOS	__OPEN
+	addq.l	#6,sp
+	
+	tst.l	d0
+	bmi	procPatchFile_err_open
+	
+	*-- ファイルハンドル保存
+	move.w	d0,(readLineFileHandle)
+	
+	*-- 行番号クリア
+	clr.w	(readLineLineNum)
+	
+	;-- Zjmp
+	movea.l	(Zjmp),a6
+	
+	
+procPatchFile_loop:
+	
+	*-- １行読みだし
+	bsr	readLine
+	tst.l	d0
+	bne	procPatchFile_err_read
+	
+	*-- トークンテーブル
+	lea	tokenTable(pc),a5
+	
+	*-- ファイル終了 ?
+	tst.l	(a5)			* 最初のトークンがない場合は EOF に達している
+	beq	procPatchFile_normret
+	
+	
+	*-- アドレス取り出し
+	bsr	getPatchAddress
+	tst.l	d0
+	bmi	procPatchFile_err_address
+	
+	move.w	d0,d7
+	
+	
+	*-- 変更前データ取り出し
+	bsr	getHexValue
+	tst.l	d0
+	bmi	procPatchFile_err_data
+	
+	move.b	d0,d6
+	
+	*-- 変更後データ取り出し
+	bsr	getHexValue
+	tst.l	d0
+	bmi	procPatchFile_err_data
+	
+	move.b	d0,d5
+	
+	
+	;-- パッチ処理
+	cmp.b	(a4,d7.w),d6
+	bne	procPatchFile_err_patch
+	
+	move.b	d5,(a4,d7.w)
+	
+	
+	;-- ここで行が終了していれば次の行へ
+	tst.l	(a5)
+	beq	procPatchFile_loop
+	
+	
+	*-- 特殊命令番号取り出し
+	bsr	getSpecialNum
+	tst.l	d0
+	bmi	procPatchFile_err_data
+	
+	;-- 指定特殊命令が既に登録済みの場合はエラー
+	lsl.w	#8,d0
+	cmp.w	CHK_SPECIAL_ADR(a6,d0.w),d7
+	beq	@f
+	
+	cmpi.w	#-1,CHK_SPECIAL_ADR(a6,d0.w)
+	bne	procPatchFile_err_special
+	
+	ror.w	#2,d4				;ページ番号 xx00_0000_0000_0000
+	or.w	d4,d0
+	move.w	d7,CHK_SPECIAL_ADR(a6,d0.w)
+	
+	
+@@:
+	;-- ここで行が終了していなけばエラー
+	tst.l	(a5)
+	bne	procPatchFile_err_data
+	
+	
+	bra	procPatchFile_loop
+	
+	
+	
+	
+procPatchFile_normret:
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	
+procPatchFile_ret:
+	*-- ファイルクローズ
+	move.l	d0,-(sp)
+	move.w	(readLineFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	move.l	(sp)+,d0
+	
+	
+	*-- 全レジスタ復帰
+	movem.l	(sp)+,d1-d7/a0-a6
+	
+	
+	rts
+
+
+;-- パッチファイルのオープンに失敗
+procPatchFile_err_open:
+	bsr	printPatchFileName
+	
+	lea	emsg_procPatchFile_err_open(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_open:
+	.dc.b	': [PATCH] パッチファイルがオープンできません。',CR,LF,0
+	.even
+
+
+;-- パッチファイルが読めない
+procPatchFile_err_read:
+	bsr	printPatchFileName
+	
+	lea	emsg_procPatchFile_err_read(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_read:
+	.dc.b	': [PATCH] パッチファイルが読めません。',CR,LF,0
+	.even
+
+
+;-- パッチアドレスに誤り
+procPatchFile_err_address:
+	bsr	printPatchFileNameWithLine
+	
+	lea	emsg_procPatchFile_err_address(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_address:
+	.dc.b	': [PATCH] パッチアドレスに誤りがあります。',CR,LF,0
+	.even
+
+
+;-- パッチデータに誤り
+procPatchFile_err_data:
+	bsr	printPatchFileNameWithLine
+	
+	lea	emsg_procPatchFile_err_data(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_data:
+	.dc.b	': [PATCH] パッチデータに誤りがあります。',CR,LF,0
+	.even
+
+
+;--- パッチ失敗
+procPatchFile_err_patch:
+	bsr	printPatchFileNameWithLine
+	
+	lea	emsg_procPatchFile_err_patch(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_patch:
+	.dc.b	': [PATCH] パッチ先のデータが違います。',CR,LF,0
+	.even
+
+
+;-- 特殊命令エラー
+procPatchFile_err_special
+	bsr	printPatchFileNameWithLine
+	
+	lea	emsg_procPatchFile_err_special(pc),a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	bra	procPatchFile_ret
+
+emsg_procPatchFile_err_special:
+	.dc.b	': [PATCH] 既に登録済みです。',CR,LF,0
+	.even
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* アドレスデータを取り出す
+
+getPatchAddress:
+	
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getPatchAddress_err
+	movea.l	(a5)+,a0
+	
+	*--
+	moveq.l	#0,d1
+	
+@@:
+	move.b	(a0)+,d0
+	beq	getPatchAddress_err
+	
+	cmpi.b	#':',d0
+	beq	@f
+	
+	bsr	checkHexDigit
+	bne	getPatchAddress_err
+	
+	bsr	hex2i
+	asl.l	#4,d1
+	add.b	d0,d1
+	
+	bra	@b
+
+@@:
+	; EOS ?
+	tst.b	(a0)
+	bne	getPatchAddress_err
+	
+	; １ページを超えていないかチェック
+	cmpi.l	#$4000,d1
+	bcc	getPatchAddress_err
+	
+	move.l	d1,d0
+	
+	rts
+
+
+getPatchAddress_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+*----------------------------------------------------------------------------------------------
+* １６進１バイト分を取り出す
+
+getHexValue:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getHexValue_err
+	movea.l	(a5)+,a0
+	
+	;--
+	moveq.l	#0,d1
+	
+	;-- 1文字目
+	move.b	(a0)+,d0
+	bsr	checkHexDigit
+	bne	getHexValue_err
+	
+	bsr	hex2i
+	move.b	d0,d1
+	
+	
+	;-- 2文字目
+	move.b	(a0)+,d0
+	bsr	checkHexDigit
+	bne	getHexValue_err
+	
+	bsr	hex2i
+	asl.b	#4,d1
+	add.b	d0,d1
+	
+	
+	;-- NULL ?
+	tst.b	(a0)
+	bne	getHexValue_err
+	
+	
+	;--
+	move.l	d1,d0
+	
+	rts
+
+getHexValue_err:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* 特殊命令番号を取り出す
+
+getSpecialNum:
+	*-- トークン取り出し
+	tst.l	(a5)
+	beq	getSpecialNum_err
+	movea.l	(a5)+,a0
+	
+	;--
+	moveq.l	#0,d1
+	
+	;-- '[' ?
+	cmpi.b	#'[',(a0)+
+	bne	getSpecialNum_err
+	
+	;-- 1文字目
+	move.b	(a0)+,d0
+	bsr	checkHexDigit
+	bne	getSpecialNum_err
+	
+	bsr	hex2i
+	move.b	d0,d1
+	
+	
+	;-- 2文字目
+	move.b	(a0)+,d0
+	bsr	checkHexDigit
+	bne	getSpecialNum_err
+	
+	bsr	hex2i
+	asl.b	#4,d1
+	add.b	d0,d1
+	
+	
+	;-- ']' ?
+	cmpi.b	#']',(a0)+
+	bne	getSpecialNum_err
+	
+	
+	;-- NULL ?
+	tst.b	(a0)
+	bne	getSpecialNum_err
+	
+	
+	;--
+	move.l	d1,d0
+	
+	rts
+
+getSpecialNum_err:
+	moveq.l	#-1,d0
+	
+	rts
+	
+
+
+
+*----------------------------------------------------------------------------------------------
+* １６進文字を数字に変換
+* IN:
+*	d0.b ... １６進文字
+* OUT:
+*	d0.b ... 値
+
+hex2i:
+	bsr	toupper
+	cmpi.b	#'A',d0
+	bcc	@f
+	
+	subi.b	#'0',d0
+	
+	rts
+@@:
+	subi.b	#'A'-10,d0
+	
+	rts
+
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* コンフィグファイルから１行読み込み、トークンに分割
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+
+readLine:
+	*-- ファイルから１行読み込む
+	move.w	(readLineFileHandle),-(sp)
+	pea.l	inpptr
+	DOS	__FGETS
+	addq.l	#6,sp
+	
+	*-- EOF ならリターン
+	tst.l	d0
+	bpl	@f
+	
+	clr.l	(tokenTable)
+	
+	moveq.l	#0,d0
+	
+	rts
+	
+@@:
+	*-- 行番号＋１
+	addq.w	#1,(readLineLineNum)
+	
+	*-- コメント & EOF 除去
+	lea	linebuf(pc),a0
+@@:
+	move.b	(a0)+,d0
+	beq	1f
+	cmpi.b	#';',d0
+	beq	@f
+	cmpi.b	#EOF,d0
+	bne	@b
+@@:
+	clr.b	-(a0)
+1:
+	
+	
+	*-- 空白で区切られた文字列毎に分ける
+	lea	linebuf(pc),a0
+	lea	tokenTable(pc),a1
+	moveq.l	#16-1,d2		* 最大トークン
+	
+1:	*++ skip space
+	move.b	(a0)+,d0
+	beq	2f
+	cmpi.b	#' ',d0
+	beq	1b
+	cmpi.b	#TAB,d0
+	beq	1b
+	
+	*++ トークン開始アドレス
+	subq.l	#1,a0
+	move.l	a0,(a1)+
+	
+	*++ skip strings
+@@:	move.b	(a0)+,d0
+	beq	2f			* １行終了なら分岐
+	cmpi.b	#' ',d0
+	beq	@f
+	cmpi.b	#TAB,d0
+	bne	@b
+	
+@@:	clr.b	-1(a0)			* 文字列分割
+	
+	dbra	d2,1b
+	
+	bra	3f
+	
+	*++ 残りのテーブルをクリア
+2:	clr.l	(a1)+
+	dbra	d2,2b
+	
+	*-- トークンがない場合は再読み込み
+3:	tst.l	(tokenTable)
+	beq	readLine
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+configFileName:
+	.dc.b	'emes.cfg',0
+	.ds.b	256-9
+
+readLineFileHandle:
+	.dc.w	0			* ファイルハンドル
+
+readLineLineNum:
+	.dc.w	0			* 行番号
+
+inpptr:
+	.dc.b	255			* 入力最大文字数
+	.dc.b	0			* 実際に入力した文字数
+linebuf:
+	.ds.b	256			* 文字列格納領域
+
+tokenTable:
+	.ds.l	16*4			* トークン格納テーブル
+
+
+
+*----------------------------------------------------------------------------------------------
+* 文字列の比較 (大文字、小文字の区別なし)
+* IN:	a0 ... 比較文字列 1
+*	a1 ... 比較文字列 2
+*
+* OUT:	Z flag ... 1:一致  0:不一致
+*
+* NOTE:	a0,a5 は破壊してはいけない
+
+stricmp:
+	movea.l	a0,a2
+@@:
+	move.b	(a1)+,d0
+	bsr	toupper
+	move.b	d0,d1
+	
+	move.b	(a2)+,d0
+	bsr	toupper
+	
+	tst.b	d0
+	beq	stricmp_eos
+	
+	tst.b	d1
+	beq	stricmp_eos
+	
+	cmp.b	d0,d1
+	beq	@b
+	
+	rts
+	
+stricmp_eos:
+	cmp.b	d0,d1
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* 大文字変換
+*  IN:	d0.b ... キャラクターコード
+
+toupper:
+	cmpi.b	#'a',d0
+	bcs	@f
+	
+	cmpi.b	#'z',d0
+	bhi	@f
+	
+	subi.b	#'a'-'A',d0
+@@:
+	rts
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* 初期化
+initX68k:
+	tst.b	(flagForceUse)
+	bne	skipCheckGraphic
+	
+	;-- グラフィック画面が使用できるかチェック
+	moveq.l	#0,d1			* GRAPHIC
+	moveq.l	#-1,d2			* check
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+	* ｼｽﾃﾑで使用 ?
+	cmpi.b	#1,d0
+	beq	err_initX68k_GVRAM
+	
+	* ｱﾌﾟﾘｹｰｼｮﾝで使用 ?
+	cmpi.b	#2,d0
+	beq	err_initX68k_GVRAM
+	
+	;-- テキスト画面が使用できるかチェック
+	moveq.l	#1,d1			* TEXT
+	moveq.l	#-1,d2			* check
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+.if 0
+	* ｼｽﾃﾑで使用 ?
+	cmpi.b	#1,d0
+	beq	err_initX68k_TVRAM
+.endif
+	
+	* ｱﾌﾟﾘｹｰｼｮﾝで使用 ?
+	cmpi.b	#2,d0
+	beq	err_initX68k_TVRAM
+	
+skipCheckGraphic:
+	;-- テキスト/グラフィック使用を設定
+	moveq.l	#0,d1			* GRAPHIC
+	moveq.l	#2,d2			* アプリケーションで使用
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+	moveq.l	#1,d1			* TEXT
+	moveq.l	#2,d2			* アプリケーションで使用
+	moveq.l	#$0e,d0			* _TGUSEMD
+	trap	#15
+	
+	
+	*-- ｶｰｿﾙ非表示
+	IOCS	__OS_CUROF
+	
+	*-- ﾏｳｽｶｰｿﾙ非表示
+	IOCS	__MS_CUROF
+	
+	
+	;-- キーボードLED状態の保存
+	IOCS	__B_SFTSNS
+	lsr.w	#8,d0
+	andi.b	#%0111_1111,d0
+	not.b	d0
+;;;	move.b	d0,(_keyboard_LED)
+	
+	
+	*-- 正常終了
+	moveq.l	#0,d0
+	
+	rts
+
+*---
+err_initX68k_GVRAM:
+	lea	emsg_initX68k_GVRAM(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_initX68k_GVRAM:
+	.dc.b	'グラフィック画面が使用できません。',CR,LF,0
+	.even
+
+*---
+err_initX68k_TVRAM:
+	lea	emsg_initX68k_TVRAM(pc),a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_initX68k_TVRAM:
+	.dc.b	'テキスト画面が使用できません。',CR,LF,0
+	.even
+
+
+
+;----------------------------------------------------------------------------------------------
+; ドライバの読み込み
+
+	.offset 0
+	.ds.w	1	; $6000 bra.w
+	.ds.w	1	; ドライバサイズ（ヘッダを含む、ここまでの２バイトは含まない）
+	.ds.b	8	; 識別文字列
+	.ds.w	64	; 各処理のオフセット
+SZ_DRVHEAD:
+	.text
+
+
+LEN_DRIVER_TAB:	.equ	64
+
+
+loadDriver:
+	;-- ドライバ読み込み領域
+	lea	Ftbl,a0
+	lea	_driverSpace,a1
+	suba.l	a0,a1
+	move.w	a1,(driverLoadOffset)
+	
+	bsr	loadSlotDriver
+	tst.l	d0
+	bne	9f
+	
+	
+	bsr	loadSoundDriver
+	tst.l	d0
+	bne	9f
+	
+	
+	;--
+	moveq.l	#0,d0
+	
+	rts
+	
+9:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+
+;-----
+; スロットドライバ読み込み
+loadSlotDriver:
+	lea	fileName_driverSLOT,a0
+	
+	tst.b	(a0)
+	beq	err_loadSlotDriver_require
+	
+	bsr	openDriverFile
+	tst.l	d0
+	bne	err_loadSlotDriver_open
+	
+	;-- ファイルのチェック
+	bsr	checkDriverFile
+	tst.l	d0
+	bne	err_loadSlotDriver
+	
+	;-- 読み込み領域に読み込み可能かチェック
+	bsr	checkAvailableDriverSpace_signed
+	tst.l	d0
+	bne	err_loadSlotDriver
+	
+	;-- 
+	lea	driverTable,a0
+	bsr	readDriverTable
+	tst.l	d0
+	bne	err_loadSlotDriver
+	
+	;--
+	bsr	readDriverFile
+	tst.l	d0
+	bne	err_loadSlotDriver
+	
+	;--
+	bsr	closeDriverFile
+	
+	;--
+	bsr	setSlotDriverRoutine
+	
+	bsr	flushCache
+	
+	;-- タイトル処理呼びだし
+	lea	Ftbl,a0
+	moveq.l	#0,d0
+	move.w	(driverTable),d0
+	jsr	(a0,d0.l)
+	
+	
+	;--
+	moveq.l	#0,d0
+	
+	rts
+
+
+
+;---
+err_loadSlotDriver_require:
+	lea	emsg_loadDriver_SLOT_require,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_loadDriver_SLOT_require:
+	.dc.b	'[DRIVER] スロットドライバの指定がありません。',CR,LF,0
+	.even
+
+;---
+err_loadSlotDriver_open:
+	lea	emsg_loadDriver_SLOT_open,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_loadDriver_SLOT_open:
+	.dc.b	'[DRIVER] スロットドライバがオープンできません。',CR,LF,0
+	.even
+
+;---
+err_loadSlotDriver:
+	lea	emsg_loadDriver_SLOT,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_loadDriver_SLOT:
+	.dc.b	'[DRIVER] スロットドライバの読み込みに失敗しました。',CR,LF,0
+	.even
+
+
+
+
+;-----
+; SOUND ドライバ読み込み
+loadSoundDriver:
+	lea	fileName_driverSOUND,a0
+	
+	;-- ドライバの指定がなければ読み込まない
+	tst.b	(a0)
+	beq	8f
+	
+	bsr	openDriverFile
+	tst.l	d0
+	bne	err_loadSoundDriver_open
+	
+	;-- ファイルのチェック
+	bsr	checkDriverFile
+	tst.l	d0
+	bne	err_loadSoundDriver
+	
+	;-- 読み込み領域に読み込み可能かチェック
+	bsr	checkAvailableDriverSpace_unsigned
+	tst.l	d0
+	bne	err_loadSoundDriver
+	
+	;-- 
+	lea	driverTable,a0
+	bsr	readDriverTable
+	tst.l	d0
+	bne	err_loadSoundDriver
+	
+	;--
+	bsr	readDriverFile
+	tst.l	d0
+	bne	err_loadSoundDriver
+	
+	;--
+	bsr	closeDriverFile
+	
+	;--
+	bsr	setSoundDriverRoutine
+	
+	bsr	flushCache
+	
+	;-- タイトル処理呼びだし
+	lea	Ftbl,a0
+	moveq.l	#0,d0
+	move.w	(driverTable),d0
+	jsr	(a0,d0.l)
+	
+	
+	;--
+8:
+	moveq.l	#0,d0
+	
+	rts
+
+
+;---
+err_loadSoundDriver_open:
+	lea	emsg_loadDriver_SOUND_open,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_loadDriver_SOUND_open:
+	.dc.b	'[DRIVER] SOUNDドライバがオープンできません。',CR,LF,0
+	.even
+
+;---
+err_loadSoundDriver:
+	lea	emsg_loadDriver_SOUND,a0
+	bsr	printString
+	
+	moveq.l	#-1,d0
+	
+	rts
+
+emsg_loadDriver_SOUND:
+	.dc.b	'[DRIVER] SOUNDドライバの読み込みに失敗しました。',CR,LF,0
+	.even
+
+
+
+
+;-----
+; ドライバファイルのオープン
+;	a0 ... ファイル名
+
+openDriverFile:
+	;-- emes.x の存在するパス
+	movea.l	(MemPointer),a1
+	lea	$80(a1),a1
+	lea	workFileName,a2
+@@:
+	move.b	(a1)+,(a2)+
+	bne	@b
+	
+	subq.l	#1,a2
+	
+	;-- ドライバ名
+@@:
+	move.b	(a0)+,(a2)+
+	bne	@b
+	
+	
+	;-- ファイルオープン
+	clr.w	-(sp)			; 読み込みモード
+	pea	workFileName		; ファイル名
+	DOS	__OPEN
+	addq.l	#6,sp
+	
+	tst.l	d0
+	bmi	err_openDriverFile
+	
+	*-- ファイルハンドル保存
+	move.w	d0,(driverFileHandle)
+	
+	moveq.l	#0,d0
+	
+	rts
+
+err_openDriverFile:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+;----------------------------
+closeDriverFile:
+	move.w	(driverFileHandle),-(sp)
+	DOS	__CLOSE
+	addq.l	#2,sp
+	
+	rts
+
+
+
+;-----------------------
+; ドライバファイルのチェック
+;
+;  1. ファイルの先頭 2バイトは 60 00 (bra.w)
+;  2. 続く２バイトはサイズ（ヘッダ含む）
+;  3. 続く８バイトは識別文字列 'emesX###' (###はバージョン)
+
+checkDriverFile:
+	;-- 先頭２バイトのチェック
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	
+	cmpi.w	#$6000,d0
+	bne	err_checkDriverFile
+	
+	;-- サイズ読み込み
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	
+	addi.w	#2,d0
+	subi.w	#SZ_DRVHEAD,d0
+	move.w	d0,(sizeDriverFile)
+	
+	;-- 識別文字列チェック
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	cmpi.w	#'em',d0
+	bne	err_checkDriverFile
+	;-
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	cmpi.w	#'es',d0
+	bne	err_checkDriverFile
+	;-
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	cmpi.w	#CHECK_VERSION_1,d0
+	bne	err_checkDriverFile
+	;-
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	err_checkDriverFile
+	cmpi.w	#CHECK_VERSION_2,d0
+	bne	err_checkDriverFile
+	
+	moveq.l	#0,d0
+	
+err_checkDriverFile:
+	
+	rts
+
+
+;-------------------------------------------
+;
+checkAvailableDriverSpace_signed:
+	move.w	(driverLoadOffset),d0
+	add.w	(sizeDriverFile),d0
+	bmi	err_checkAvailableDriverSpace
+	bcs	err_checkAvailableDriverSpace
+	
+	moveq.l	#0,d0
+	
+	rts
+
+
+checkAvailableDriverSpace_unsigned:
+	move.w	(driverLoadOffset),d0
+	add.w	(sizeDriverFile),d0
+	bcs	err_checkAvailableDriverSpace
+	
+	moveq.l	#0,d0
+	
+	rts
+
+
+err_checkAvailableDriverSpace:
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+;-----
+readDriverFile_byte:
+	move.w	(driverFileHandle),-(sp)
+	DOS	__FGETC
+	addq.l	#2,sp
+	
+	rts
+
+
+;-----
+readDriverFile_word:
+	bsr	readDriverFile_byte
+	tst.l	d0
+	bmi	@f
+	
+	move.b	d0,-(sp)
+	
+	bsr	readDriverFile_byte
+	tst.l	d0
+	bmi	@f
+	
+	moveq.l	#0,d1
+	move.w	(sp)+,d1
+	move.b	d0,d1
+	move.l	d1,d0
+@@:
+	rts
+
+
+;-----------
+; a0 ... buf
+readDriverTable:
+	move.w	(driverLoadOffset),d3
+	moveq.l	#LEN_DRIVER_TAB-1,d2
+1:
+	bsr	readDriverFile_word
+	tst.l	d0
+	bmi	9f
+	
+	tst.w	d0
+	beq	@f
+	add.w	d3,d0
+@@:	move.w	d0,(a0)+
+	dbra	d2,1b
+	
+	moveq.l	#0,d0
+9:
+	rts
+
+
+
+;----------------
+setSlotDriverRoutine:
+	lea	driverTable,a0
+	movea.l	(Zjmp),a1
+	
+	;-- 初期化ルーチン
+	move.w	2(a0),InitSlotRoutine(a1)
+	
+	;-- 基本スロット切り替えルーチン
+	move.w	4(a0),ChangeSlotRoutine(a1)
+	
+	;-- 拡張スロット切り替えルーチン
+	move.w	6(a0),d0
+	lea	RelAdr_ExtSlot,a2
+@@:
+	move.w	(a2)+,d1
+	beq	@f
+	
+	move.w	d0,(a1,d1.w)
+	bra	@b
+@@:
+	
+	
+	;-- メモリマッパ切り替えルーチン Page 0
+	move.w	8(a0),ChangeMemMapRoutine_Page0(a1)
+	
+	;-- メモリマッパ切り替えルーチン Page 1
+	move.w	10(a0),ChangeMemMapRoutine_Page1(a1)
+	
+	;-- メモリマッパ切り替えルーチン Page 2
+	move.w	12(a0),ChangeMemMapRoutine_Page2(a1)
+	
+	;-- メモリマッパ切り替えルーチン Page 3
+	move.w	14(a0),ChangeMemMapRoutine_Page3(a1)
+	
+	
+	;-- メガロム
+	move.w	16(a0),ChangeMegaROM_Page1Low(a1)
+	move.w	18(a0),ChangeMegaROM_Page1High(a1)
+	move.w	20(a0),ChangeMegaROM_Page2Low_wP1(a1)
+	move.w	22(a0),ChangeMegaROM_Page2Low_wP2(a1)
+	move.w	24(a0),ChangeMegaROM_Page2High_wP1(a1)
+	move.w	26(a0),ChangeMegaROM_Page2High_wP2(a1)
+	move.w	28(a0),ChangeMegaROM_Page1(a1)
+	move.w	30(a0),ChangeMegaROM_Page2(a1)
+	
+	
+	bsr	flushCache
+	
+	rts
+
+
+;------------------
+setSoundDriverRoutine:
+	lea	driverTable,a0
+	movea.l	(Zjmp),a1
+	
+	;-- 初期化ルーチン
+	move.w	2(a0),InitSoundRoutine(a1)
+	
+	lea	_PSG_ProcTable,a1
+	
+	move.w	4(a0),(a1)+	; IN R#0
+	move.w	6(a0),(a1)+	; IN R#1
+	move.w	8(a0),(a1)+	; IN R#2
+	move.w	10(a0),(a1)+	; IN R#3
+	move.w	12(a0),(a1)+	; IN R#4
+	move.w	14(a0),(a1)+	; IN R#5
+	move.w	16(a0),(a1)+	; IN R#6
+	move.w	18(a0),(a1)+	; IN R#7
+	move.w	20(a0),(a1)+	; IN R#8
+	move.w	22(a0),(a1)+	; IN R#9
+	move.w	24(a0),(a1)+	; IN R#10
+	move.w	26(a0),(a1)+	; IN R#11
+	move.w	28(a0),(a1)+	; IN R#12
+	move.w	30(a0),(a1)+	; IN R#13
+	move.w	32(a0),(a1)+	; IN R#14
+	move.w	34(a0),(a1)+	; IN R#15
+
+	move.w	36(a0),(a1)+	; OUT R#0
+	move.w	38(a0),(a1)+	; OUT R#1
+	move.w	40(a0),(a1)+	; OUT R#2
+	move.w	42(a0),(a1)+	; OUT R#3
+	move.w	44(a0),(a1)+	; OUT R#4
+	move.w	46(a0),(a1)+	; OUT R#5
+	move.w	48(a0),(a1)+	; OUT R#6
+	move.w	50(a0),(a1)+	; OUT R#7
+	move.w	52(a0),(a1)+	; OUT R#8
+	move.w	54(a0),(a1)+	; OUT R#9
+	move.w	56(a0),(a1)+	; OUT R#10
+	move.w	58(a0),(a1)+	; OUT R#11
+	move.w	60(a0),(a1)+	; OUT R#12
+	move.w	62(a0),(a1)+	; OUT R#13
+	move.w	64(a0),(a1)+	; OUT R#14
+	move.w	66(a0),(a1)+	; OUT R#15
+	
+	movea.l	(Zjmp),a1
+	move.w	68(a0),OutputSCC(a1)
+	
+	rts
+
+
+
+;------------
+readDriverFile:
+	*-- ファイル読み込み
+	move.w	(sizeDriverFile),-(sp)		; 読み込みサイズ
+	clr.w	-(sp)				; 
+	
+	;-- 読み込みﾊﾞｯﾌｧ
+	lea	Ftbl,a0
+	moveq.l	#0,d0
+	move.w	(driverLoadOffset),d0
+	adda.l	d0,a0
+	move.l	a0,-(sp)
+	
+	move.w	(driverFileHandle),-(sp)		* ファイルハンドル
+	DOS	__READ
+	lea	10(sp),sp
+	
+	tst.l	d0
+	bmi	@f
+	
+	cmp.w	(sizeDriverFile),d0
+	bne	@f
+	
+	;--
+	add.w	d0,(driverLoadOffset)
+	
+	moveq.l	#0,d0
+	
+	rts
+
+@@:	moveq.l	#-1,d0
+	
+	rts
+
+
+
+
+*----------------------------------------------------------------------------------------------
+* メモリ割り当てのための初期化
+*
+*  IN:	なし
+*  OUT:	d0.l ... 0:正常  !0:エラー
+
+initAlloc:
+	*-- 割り当て用メモリの先頭アドレスを 64K 境界に合わせる
+	move.l	(ProgramEndAdr),d0
+	tst.w	d0
+	beq	@f
+	clr.w	d0
+	addi.l	#$10000,d0
+@@:
+	cmp.l	(EndMemoryBlockAdr),d0	* メモリブロックの最後を越えていたらエラー
+	bcc	initAlloc_err_mem
+	
+	move.l	d0,(TopAllocMemory)
+	
+	*-- 空きメモリサイズ
+	move.l	(EndMemoryBlockAdr),d0	* メモリブロックの終わり+1のアドレス
+	sub.l	(TopAllocMemory),d0	* 空きメモリのサイズを求める
+	
+	move.l	d0,(SizeFreeMemory)
+	
+	*-- 正常リターン
+	moveq.l	#0,d0
+	
+	rts
+
+
+*-- メモリ不足エラー
+initAlloc_err_mem:
+	lea	emsg_notEnoughMem,a0
+	bsr	printString
+	
+	*-- エラーリターン
+	moveq.l	#-1,d0
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* メモリの確保
+*  IN:	d0.l ... size
+*  OUT:	d0.l ... 確保されたメモリの先頭
+
+memoryAlloc:
+	move.l	a0,-(sp)
+	
+	suba.l	a0,a0
+	
+	*-- メモリ確保できるか?
+	cmp.l	(SizeFreeMemory),d0
+	bhi.s	@f
+	
+	*-- 確保したメモリの先頭
+	movea.l	(TopAllocMemory),a0
+	
+	*-- 空きメモリの先頭を変更
+	add.l	d0,(TopAllocMemory)
+	
+	*-- 空きメモリのサイズを変更
+	sub.l	d0,(SizeFreeMemory)
+@@:
+	move.l	a0,d0
+	
+	move.l	(sp)+,a0
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+* 未使用メモリの解放
+
+freeUnuseMemory:
+	*-- メモリブロック開始アドレス
+	movea.l	(MemPointer),a0
+	lea	$10(a0),a0
+	
+	*-- メモリブロックサイズ
+	movea.l	(TopAllocMemory),a1
+	suba.l	a0,a1
+	
+	*-- メモリブロックサイズ変更
+	move.l	a1,-(sp)		* ブロックサイズ
+	move.l	a0,-(sp)		* ブロック開始アドレス
+	DOS	__SETBLOCK
+	addq.l	#8,sp
+	
+	rts
+
+
+
+*----------------------------------------------------------------------------------------------
+	.data
+	.even
+
+MemPointer		.ds.l	1	* プログラムのメモリ管理ポインタのアドレス
+ProgramEndAdr		.ds.l	1	* プログラム(DATA, BSS含む)の終わり+1のアドレス
+CommandLineAdr		.ds.l	1	* プログラムに渡されたコマンドラインのアドレス
+EnvAdr			.ds.l	1	* 環境のアドレス
+ProgramStartAdr		.ds.l	1	* プログラムの実行先頭アドレス
+EndMemoryBlockAdr	.ds.l	1	* 
+
+TopAllocMemory		.ds.l	1	* 空きメモリの先頭アドレス
+SizeFreeMemory		.ds.l	1	* 空きメモリのサイズを変更
+
+slotNumber		.ds.b	1	* 基本スロット番号
+extSlotNumber		.ds.b	1	* 拡張スロット番号
+pageNumber		.ds.b	1	* ページ番号
+			.even
+segmentNumber		.ds.w	1	* セグメント数
+
+unmappedPage		.ds.l	1	* 
+
+Zjmp			.ds.l	1	* Z80emu
+Z80mem			.ds.l	1	* Z80 memory
+
+Zjmp_offset		.dc.l	0	; Z80emu のリロケートのオフセット
+
+flag_setConfigFile:	.dc.w	0	* コンフィグファイル名が指定されたら !0
+
+verboseMode		.dc.w	0	* Verbose mode (0:OFF, !0:ON)
+FlagDebuggerON:		.dc.w	0	* Debugger (0:OFF, !0:ON)
+
+FlagBreakPoint:		.dc.w	0	; ブレイクポイント設定 (0:OFF, !0:ON)
+BreakPoint:		.dc.w	0	; ブレイクポイントアドレス
+
+flagForceUse:		.dc.w	0	; グラフィック画面の強制使用フラグ (0:OFF, !0:ON)
+
+;-- ドライバファイル名
+fileName_driverSLOT:	.dcb.b	SZ_DRVFNAME,0
+fileName_driverSOUND:	.dcb.b	SZ_DRVFNAME,0
+workFileName:		.ds.b	SZ_DRVFNAME+128
+driverFileHandle:	.ds.w	1
+sizeDriverFile:		.dc.w	0
+driverLoadOffset:	.dc.w	0
+driverTable:		.dcb.w	LEN_DRIVER_TAB,0
+
+;--
+workMEGAROM_adr:	.ds.l	1
+workMEGAROM_size:	.ds.l	1
+workMEGAROM_tbl:	.ds.l	1
+workMEGAROM_type:	.ds.w	1
+workMEGAROM_segments:	.ds.w	1
+
+freeMEGAROM_tbl:	.dc.w	0
+nextMEGAROM_tbl:	.ds.l	1
+
+
+*-- 汎用エラーメッセージ
+emsg_notEnoughMem:
+	.dc.b	'メモリ不足のため起動できません。',CR,LF,0
+
+emsg_internal:
+	.dc.b	'内部エラーが発生しました。',CR,LF,0
+
+
+*-- スロット情報テーブル
+slotInfoTable:
+	.dcb.b	SZ_SLOT_INFO*4*4*4,0
+
+
+	.end	Entrance

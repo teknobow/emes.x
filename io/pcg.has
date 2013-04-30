@@ -1,0 +1,150 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+
+	.xdef	create_PCGtable
+	.xdef	table_PCGtoGRAPH,table_PCGtoXPCG
+	
+	.xref	PCGdatatbl
+	
+	
+	.text
+	.quad
+	
+create_PCGtable:
+	;---------------------------------------------------
+	lea	maskTable,a1
+	
+	;--
+	moveq.l	#0,d3		;pattern
+	
+2:
+	move.w	d3,-(sp)
+	moveq.l	#0,d4
+	moveq.l	#8-1,d2
+1:	
+	lsl.l	#4,d4
+	add.b	d3,d3
+	bcc	@f
+	ori.b	#$0f,d4
+@@:	
+	dbra	d2,1b
+	
+	move.l	d4,(a1)+	;mask table
+	
+	move.w	(sp)+,d3
+	
+	addq.b	#1,d3
+	bne	2b
+	
+	;--
+	
+	
+	
+	
+	
+	;---------------------------------------------------
+	;-- PCG conv table
+	lea	PCGdatatbl,a0
+	
+	;-- 
+	lea	table_PCGtoGRAPH,a1
+	lea	table_PCGtoXPCG,a2
+	
+	;--
+	lea	patConv(pc),a3
+	
+	;-- pattern num
+	moveq.l	#0,d7		;XPCG—p
+	moveq.l	#0,d2		;GRAPH—p
+	
+	;-- Foreground color
+	moveq.l	#0,d6
+	
+	;-- Background color
+	moveq.l	#0,d5
+	
+	;--
+	move.w	#$0100,d3
+	moveq.l	#16,d4
+	
+	
+1:	
+	;--
+	;-- GRAPH
+	move.w	d2,d0		;pat
+	add.w	d0,d0
+	move.w	(a3,d0.w),d0
+	move.b	d6,d0		;fg
+	move.l	(a0,d0.w),d1
+	move.b	d5,d0		;bg
+	or.l	4(a0,d0.w),d1
+	move.l	d1,(a1)+
+	
+	;-- XPCG
+	move.w	d7,d0		;pat
+	move.b	d6,d0		;fg col
+	move.l	(a0,d0.w),d1
+	move.b	d5,d0		;bg col
+	or.l	4(a0,d0.w),d1
+	move.l	d1,(a2)+
+	
+	
+	;--
+	add.b	d4,d5		;bg
+	bne	1b
+	
+	;--
+	add.b	d4,d6		;fg
+	bne	1b
+	
+	;--
+	addq.b	#1,d2		;pat
+	add.w	d3,d7		;pat
+	bne	1b
+	
+	
+	;--
+	moveq.l	#0,d0
+	
+	rts
+	
+	
+	
+	;-------------------
+	; 76543210 -> 75316420
+	; 75316420
+patConv:
+	P: = 0
+	.rept 256
+	CP: = P.and.$01			;0
+	CP: = CP.or.((P.and.$02)<<3)	;1
+	CP: = CP.or.((P.and.$04)>>1)	;2
+	CP: = CP.or.((P.and.$08)<<2)	;3
+	CP: = CP.or.((P.and.$10)>>2)	;4
+	CP: = CP.or.((P.and.$20)<<1)	;5
+	CP: = CP.or.((P.and.$40)>>3)	;6
+	CP: = CP.or.((P.and.$80))	;7
+	.dc.w	CP<<8
+	P: = P+1
+	.endm
+	
+	
+	
+	.bss
+	.quad
+maskTable:
+	.ds.b	256*4
+	
+table_PCGtoGRAPH:
+	.ds.b	256*16*16*4
+
+table_PCGtoXPCG:
+	.ds.b	256*16*16*4
+	
+	
+	.end

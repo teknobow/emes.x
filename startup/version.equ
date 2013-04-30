@@ -1,0 +1,18 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+VERSION_STRING	.macro
+	.dc.b	'0.20'
+.endm
+
+CHECK_VERSION_1:	.equ	'X0'
+CHECK_VERSION_2:	.equ	'20'
+
+VERSION_CODE	.macro
+	.dc.w	CHECK_VERSION_1
+	.dc.w	CHECK_VERSION_2
+.endm

@@ -1,0 +1,11 @@
+../work/000/z80emu.o
+../work/000/flagtbl.o
+../work/share/ftbl8.o
+../work/share/disasmtab.o
+../work/000/io.o
+../work/000/scrupdate.o
+../work/share/pcgtbl.o
+../work/share/pcg.o
+../work/000/relextslot.o
+../work/share/_debugger.o
+../work/000/startup.o

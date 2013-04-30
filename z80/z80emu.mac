@@ -1,0 +1,230 @@
+;----------------------------------------------------------------------------------------------
+; MSX Emulator for X680x0 - emes.x
+;
+;    Copyright 1997-1998 nir
+;
+
+
+Fset	macro	setflag
+	ori.b	#set&setflag,regF	* 8 (4)
+	endm
+
+Fclr	macro	clrflag
+	andi.b	#.not.set&clrflag.and.$ff,regF	* 8 (4)
+	endm
+
+Fchg	macro	chgflag
+	eori.b	#set&chgflag,regF	* 8 (4)
+	endm
+
+
+
+SETbit0H	equ %00000001_00000000
+SETbit1H	equ %00000010_00000000
+SETbit2H	equ %00000100_00000000
+SETbit3H	equ %00001000_00000000
+SETbit4H	equ %00010000_00000000
+SETbit5H	equ %00100000_00000000
+SETbit6H	equ %01000000_00000000
+SETbit7H	equ %10000000_00000000
+
+SETbit0L	equ %00000001
+SETbit1L	equ %00000010
+SETbit2L	equ %00000100
+SETbit3L	equ %00001000
+SETbit4L	equ %00010000
+SETbit5L	equ %00100000
+SETbit6L	equ %01000000
+SETbit7L	equ %10000000
+
+RESbit0H	equ %11111110_11111111
+RESbit1H	equ %11111101_11111111
+RESbit2H	equ %11111011_11111111
+RESbit3H	equ %11110111_11111111
+RESbit4H	equ %11101111_11111111
+RESbit5H	equ %11011111_11111111
+RESbit6H	equ %10111111_11111111
+RESbit7H	equ %01111111_11111111
+
+RESbit0L	equ %11111110
+RESbit1L	equ %11111101
+RESbit2L	equ %11111011
+RESbit3L	equ %11110111
+RESbit4L	equ %11101111
+RESbit5L	equ %11011111
+RESbit6L	equ %10111111
+RESbit7L	equ %01111111
+
+BITbit0H	equ 0+8
+BITbit1H	equ 1+8
+BITbit2H	equ 2+8
+BITbit3H	equ 3+8
+BITbit4H	equ 4+8
+BITbit5H	equ 5+8
+BITbit6H	equ 6+8
+BITbit7H	equ 7+8
+
+BITbit0L	equ %00000001
+BITbit1L	equ %00000010
+BITbit2L	equ %00000100
+BITbit3L	equ %00001000
+BITbit4L	equ %00010000
+BITbit5L	equ %00100000
+BITbit6L	equ %01000000
+BITbit7L	equ %10000000
+
+
+
+interrupt	equ	_Z80intrRoutine-_Zjmp
+
+
+FETCH_INTERRUPT	.macro
+	jmp	interrupt(regZjmp)	* 10 (4)
+.endm
+
+
+ENTER_DEBUGGER	.macro
+	jmp	exception(regFtbl)	* 10 (4)
+.endm
+
+ENTER_DEBUGGER2	.macro
+	jmp	enterDebugger(regFtbl)	* 10 (4)
+.endm
+
+
+COUNT		.macro
+
+.endm
+
+
+NotImpliment	.macro	size
+	.if size>1
+		subq.w	#size-1,regPC			* (2)
+	.endif
+	
+	ENTER_DEBUGGER2					* 
+.endm
+
+IllegalOP	.macro	size
+	.if size>1
+		subq.w	#size-1,regPC			* (2)
+	.endif
+	
+	ENTER_DEBUGGER2					* 
+.endm
+
+
+ExtSlotSrc_A	.equ	1
+ExtSlotSrc_B	.equ	2
+ExtSlotSrc_C	.equ	3
+ExtSlotSrc_D	.equ	4
+ExtSlotSrc_E	.equ	5
+ExtSlotSrc_H	.equ	6
+ExtSlotSrc_L	.equ	7
+ExtSlotSrc_n	.equ	8
+
+dummy_changeExtSlot	.equ	$ffff
+
+RELADNUM = 0
+
+SETREL_EXTSLOT	.macro
+	RELADR_EXTSLOT_%RELADNUM: .equ *+2
+	RELADNUM: = RELADNUM+1
+.endm
+
+
+CHECK_EXTSLOT	.macro	dst,src,fl
+	.if CHECK_0xFFFF.eq.1
+		.local skip
+**		addq.w	#1,reg				*  4
+**		beq.s	@f				* 10/ 8 (T/F)
+**		subq.w	#1,reg				*  4
+		
+		
+***		addq.w	#1,reg				*     4
+***		bcs.s	changeExtSlot			* 10/ 8 (•ªŠò‚ ‚è/‚È‚µ)
+***		subq.w	#1,reg				*     4
+		
+		
+		addq.w	#1,dst				*  4
+		dbf	dst,skip			* 10/14 (•ªŠò‚ ‚è/‚È‚µ)
+		
+		;--
+		.if fl.eq.1
+			move.l	dst,a0			*  4
+		.endif
+		
+		.if src.eq.ExtSlotSrc_A
+			move.b	regA,d1			*  4
+		
+		.elseif src.eq.ExtSlotSrc_B
+			move.w	regBC,-(regSwap)	*  8
+			move.b	(regSwap)+,d1		*  8
+		
+		.elseif src.eq.ExtSlotSrc_C
+			move.b	regBC,d1		*  4
+		
+		.elseif src.eq.ExtSlotSrc_D
+			move.w	regDE,-(regSwap)	*  8
+			move.b	(regSwap)+,d1		*  8
+		
+		.elseif src.eq.ExtSlotSrc_E
+			move.b	regDE,d1		*  4
+		
+		.elseif src.eq.ExtSlotSrc_H
+			move.w	regHL,-(regSwap)	*  8
+			move.b	(regSwap)+,d1		*  8
+		
+		.elseif src.eq.ExtSlotSrc_L
+			move.b	regHL,d1		*  4
+		
+		.elseif src.eq.ExtSlotSrc_n
+			move.b	(regPC)+,d1		*  8
+		
+		.else
+			.fail 1
+		.endif
+		
+		SETREL_EXTSLOT
+		jmp	dummy_changeExtSlot(regFtbl)	* 10
+	skip:
+	.endif
+.endm
+
+
+
+.if DISABLE_ROM_WRITE.eq.1
+CNT_CHKROM_SKIP_LABEL	= 0
+CHKROM_SKIP_LABEL	= -1
+.endif
+
+CHECK_ROM	.macro	regadr,regwork
+	.if DISABLE_ROM_WRITE.eq.1
+		.fail CHKROM_SKIP_LABEL.ne.-1
+		
+**		move.w	#$c000,regwork			*  8
+**		and.w	regadr,regwork			*  4
+		
+		move.w	regadr,regwork			*  4
+		clr.b	regwork				*  4
+		
+		CHKROM_SKIP_LABEL: = CNT_CHKROM_SKIP_LABEL
+		CNT_CHKROM_SKIP_LABEL: = CNT_CHKROM_SKIP_LABEL+1
+		
+;;;		tst.b	O_CHKROM(regZjmp,regwork.w)	* 14
+;;;		bne.s	CHKROM_SKIP_%CHKROM_SKIP_LABEL	* 10/ 8 (•ªŠò‚ ‚è/‚È‚µ)
+		
+		move.w	O_CHKROM(regZjmp,regwork.w),regwork
+		bne.s	CHKROM_SKIP_%CHKROM_SKIP_LABEL	* 10/ 8 (•ªŠò‚ ‚è/‚È‚µ)
+	.endif
+.endm
+
+CHECK_ROM_SKIP_LABEL	.macro
+	.if DISABLE_ROM_WRITE.eq.1
+		.fail CHKROM_SKIP_LABEL.eq.-1
+		
+	CHKROM_SKIP_%CHKROM_SKIP_LABEL:
+		
+		CHKROM_SKIP_LABEL: = -1
+	.endif
+.endm
